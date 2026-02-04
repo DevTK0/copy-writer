@@ -436,6 +436,20 @@ function App() {
     }
   };
 
+  const scrollToSegmentInEditor = (segmentIndex: number) => {
+    const segment = segments[segmentIndex];
+    if (!segment) return;
+
+    // Calculate line number from startIndex
+    const lineNumber = content.substring(0, segment.startIndex).split('\n').length;
+
+    // Find chunk containing this line
+    const chunk = chunks.find(c => lineNumber >= c.startLine && lineNumber <= c.endLine);
+    if (chunk) {
+      scrollToChunkInEditor(chunk.id);
+    }
+  };
+
   const renderPreview = () => {
     if (!lastProcessedSegment) {
       return { __html: marked.parse(content || '') as string };
@@ -940,7 +954,10 @@ function App() {
                   key={index}
                   className="flex items-center justify-between p-2 rounded bg-gray-50 hover:bg-gray-100"
                 >
-                  <div className="flex-1 min-w-0 mr-2">
+                  <div
+                    className="flex-1 min-w-0 mr-2 cursor-pointer hover:bg-gray-200 rounded p-1 -m-1"
+                    onClick={() => scrollToSegmentInEditor(index)}
+                  >
                     <p className="text-xs font-medium text-gray-700 truncate">
                       Task {index + 1}
                     </p>
