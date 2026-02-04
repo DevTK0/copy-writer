@@ -7,7 +7,9 @@ interface Segment {
   startIndex: number;
   endIndex: number;
   processed: boolean;
-  chunkId?: string;
+  chunkId: string;
+  localIndex: number;  // Index within the chunk
+  chunkTitle: string;  // For display purposes
 }
 
 interface MemoryFile {
@@ -15,13 +17,29 @@ interface MemoryFile {
   content: string;
 }
 
-interface Chunk {
+interface Page {
+  id: string;
+  filename: string;
+  title: string;
+  moduleTitle?: string;
+  chapterTitle?: string;
+  content: string;
+  order: number;
+  segmentCount: number;
+}
+
+interface Chapter {
   id: string;
   title: string;
-  level: number;
-  content: string;
-  startLine: number;
-  endLine: number;
+  order: number;
+  pages: Page[];
+}
+
+interface Module {
+  id: string;
+  title: string;
+  order: number;
+  chapters: Chapter[];
 }
 
 interface HistorySnapshot {
@@ -29,7 +47,15 @@ interface HistorySnapshot {
   timestamp: number;
   label: string;
   content: string;
-  chunks: Chunk[];
+  chunks: Page[];
+}
+
+interface TextSelection {
+  text: string;
+  chunkId: string;
+  startOffset: number;
+  endOffset: number;
+  rect: { top: number; left: number; width: number };
 }
 
 function App() {
@@ -49,9 +75,9 @@ function App() {
     const saved = localStorage.getItem('copywriter-sidebarCollapsed');
     return saved ? JSON.parse(saved) : false;
   });
-  const [activeTab, setActiveTab] = useState<'editor' | 'memory' | 'images'>(() => {
+  const [activeTab, setActiveTab] = useState<'editor' | 'content' | 'memory' | 'images'>(() => {
     const saved = localStorage.getItem('copywriter-activeTab');
-    return (saved as 'editor' | 'memory' | 'images') || 'editor';
+    return (saved as 'editor' | 'content' | 'memory' | 'images') || 'editor';
   });
   const [selectedMemoryFile, setSelectedMemoryFile] = useState<string | null>(() => {
     const saved = localStorage.getItem('copywriter-selectedMemoryFile');
@@ -71,51 +97,56 @@ function App() {
   const [images, setImages] = useState<string[]>([]);
   const [imageSearch, setImageSearch] = useState('');
   const [chunkSearch, setChunkSearch] = useState('');
-  const [chunks, setChunks] = useState<Chunk[]>(() => {
-    const saved = localStorage.getItem('copywriter-chunks');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [selectedChunks, setSelectedChunks] = useState<Set<string>>(() => {
-    const saved = localStorage.getItem('copywriter-selectedChunks');
-    return saved ? new Set(JSON.parse(saved)) : new Set();
-  });
-  const [draggingChunkIndex, setDraggingChunkIndex] = useState<number | null>(null);
+  const [modules, setModules] = useState<Module[]>([]);
+  const [chunks, setChunks] = useState<Page[]>([]); // Flattened list of pages for editor
+  const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
   const [openAccordion, setOpenAccordion] = useState<'memory' | 'chunks' | 'segments' | 'images' | 'history'>('memory');
   const [editingChunkId, setEditingChunkId] = useState<string | null>(null);
-  const [dragOverChunkIndex, setDragOverChunkIndex] = useState<number | null>(null);
-  const [lastProcessedChunkId, setLastProcessedChunkId] = useState<string | null>(null);
-  const [processingChunkId, setProcessingChunkId] = useState<string | null>(null);
+  const [lastProcessedChunkIds, setLastProcessedChunkIds] = useState<Set<string>>(new Set());
+  const [processingChunkIds, setProcessingChunkIds] = useState<Set<string>>(new Set());
   const [focusedChunkId, setFocusedChunkId] = useState<string | null>(null);
+  const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
+  const [expandedChapters, setExpandedChapters] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<HistorySnapshot[]>(() => {
     const saved = localStorage.getItem('copywriter-history');
     return saved ? JSON.parse(saved) : [];
   });
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [textSelection, setTextSelection] = useState<TextSelection | null>(null);
+  const [selectionProcessing, setSelectionProcessing] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadMemoryFiles();
     loadImages();
-  }, [memoryDir]);
+    loadChunksFromFiles();
+  }, []);
 
-  // Scroll preview to active chunk
+  // Scroll preview to active chunk (scroll to first processing chunk)
   useEffect(() => {
-    const activeChunkId = editingChunkId || processingChunkId || lastProcessedChunkId;
+    const activeChunkId = editingChunkId || [...processingChunkIds][0] || [...lastProcessedChunkIds][0];
     if (activeChunkId && previewRef.current) {
       const element = previewRef.current.querySelector(`[data-chunk-id="${activeChunkId}"]`);
       if (element) {
         element.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     }
-  }, [editingChunkId, processingChunkId, lastProcessedChunkId]);
+  }, [editingChunkId, processingChunkIds, lastProcessedChunkIds]);
 
+  // Derive content from chunks
   useEffect(() => {
-    // Don't re-parse while editing a chunk - it will replace chunks and cause cursor issues
-    if (!editingChunkId) {
-      parseContent();
+    const composedContent = chunks.map(c => c.content).join('\n\n');
+    setContent(composedContent);
+  }, [chunks]);
+
+  // Parse segments when content changes - only if not using chunk-based system
+  // When chunks are loaded, segments are parsed per-chunk in loadChunksFromFiles
+  useEffect(() => {
+    if (!editingChunkId && content && chunks.length === 0) {
+      parseSegments();
     }
-  }, [content, editingChunkId]);
+  }, [content, editingChunkId, chunks.length]);
 
   // Persist state to localStorage
   useEffect(() => {
@@ -201,6 +232,119 @@ function App() {
     }
   };
 
+  const loadChunksFromFiles = async () => {
+    try {
+      // Load flattened chunks for editor
+      const chunksResponse = await fetch('/api/chunks');
+      const chunksData = await chunksResponse.json();
+      if (chunksData.chunks) {
+        setChunks(chunksData.chunks);
+        setSelectedChunks(new Set());
+
+        // Parse segments per-chunk for parallel processing support
+        const allSegments: Segment[] = [];
+        let globalIndex = 0;
+
+        for (const chunk of chunksData.chunks as Page[]) {
+          // Find all <agent> segments in this chunk
+          const agentRegex = /<agent>([\s\S]*?)<\/agent>/g;
+          let match;
+          let localIndex = 0;
+
+          while ((match = agentRegex.exec(chunk.content)) !== null) {
+            const fullContent = match[1];
+            const promptMatch = fullContent.match(/<prompt>([\s\S]*?)<\/prompt>/);
+            const prompt = promptMatch ? promptMatch[1].trim() : fullContent.trim();
+
+            allSegments.push({
+              index: globalIndex++,
+              prompt,
+              startIndex: match.index,
+              endIndex: match.index + match[0].length,
+              processed: false,
+              chunkId: chunk.id,
+              localIndex: localIndex++,
+              chunkTitle: chunk.title
+            });
+          }
+        }
+
+        setSegments(allSegments);
+
+        // Also update combined content for preview
+        const combinedContent = chunksData.chunks.map((c: Page) => c.content).join('\n\n');
+        setContent(combinedContent);
+      }
+
+      // Load hierarchical structure for Content tab
+      const contentResponse = await fetch('/api/content');
+      const contentData = await contentResponse.json();
+      if (contentData.modules) {
+        setModules(contentData.modules);
+        // Expand all modules and chapters by default
+        setExpandedModules(new Set(contentData.modules.map((m: Module) => m.id)));
+        const allChapters = contentData.modules.flatMap((m: Module) =>
+          m.chapters.map((c: Chapter) => c.id)
+        );
+        setExpandedChapters(new Set(allChapters));
+      }
+    } catch (error) {
+      console.error('Error loading content:', error);
+    }
+  };
+
+  const importMarkdownAsChunks = async (markdownContent: string) => {
+    // Import using === Module === and --- Chapter --- format
+    // Confirm before replacing
+    if (modules.length > 0) {
+      if (!confirm('This will delete all existing content and import new modules/chapters. Continue?')) {
+        return;
+      }
+    }
+
+    try {
+      const response = await fetch('/api/content/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: markdownContent,
+          clearExisting: true
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+      alert(`Imported ${data.imported.modules} modules with ${data.imported.chapters} chapters successfully`);
+    } catch (error: any) {
+      console.error('Error importing:', error);
+      alert('Error importing: ' + (error.message || error));
+    }
+  };
+
+  const parseSegments = async () => {
+    if (!content) {
+      setSegments([]);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      });
+      const data = await response.json();
+      setSegments(data.segments || []);
+    } catch (error) {
+      console.error('Error parsing segments:', error);
+    }
+  };
+
   const uploadImage = async (file: File) => {
     try {
       const formData = new FormData();
@@ -261,32 +405,6 @@ function App() {
     }
   };
 
-  const parseContent = async () => {
-    if (!content) {
-      setSegments([]);
-      setChunks([]);
-      return;
-    }
-
-    try {
-      const response = await fetch('/api/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content })
-      });
-      const data = await response.json();
-      setSegments(data.segments || []);
-      setChunks(data.chunks || []);
-
-      // Only reset selected chunks if this is a fresh parse (no existing chunks)
-      if (chunks.length === 0) {
-        setSelectedChunks(new Set());
-      }
-    } catch (error) {
-      console.error('Error parsing content:', error);
-    }
-  };
-
   const processAllSegments = async () => {
     // Save snapshot before processing all
     saveSnapshot('Before processing all tasks');
@@ -330,19 +448,44 @@ function App() {
     }
   };
 
-  const loadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setContent(event.target?.result as string);
-      };
-      reader.readAsText(file);
-    }
-  };
-
   const saveFile = () => {
-    const blob = new Blob([content], { type: 'text/markdown' });
+    let exportContent = '';
+
+    if (chunks.length > 0) {
+      // Reconstruct document with module/chapter/page delimiters
+      let currentModule = '';
+      let currentChapter = '';
+
+      chunks.forEach((chunk) => {
+        const moduleName = chunk.moduleTitle || '';
+        const chapterName = chunk.chapterTitle || '';
+        const pageName = chunk.title || '';
+
+        // Add module delimiter if changed
+        if (moduleName && moduleName !== currentModule) {
+          if (exportContent) exportContent += '\n';
+          exportContent += `=== ${moduleName} ===\n\n`;
+          currentModule = moduleName;
+          currentChapter = ''; // Reset chapter when module changes
+        }
+
+        // Add chapter delimiter if changed
+        if (chapterName && chapterName !== currentChapter) {
+          exportContent += `--- ${chapterName} ---\n\n`;
+          currentChapter = chapterName;
+        }
+
+        // Add page delimiter and content
+        if (pageName) {
+          exportContent += `+++ ${pageName} +++\n\n`;
+        }
+        exportContent += (chunk.content || '') + '\n\n';
+      });
+    } else {
+      exportContent = content;
+    }
+
+    const blob = new Blob([exportContent.trim()], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -362,65 +505,44 @@ function App() {
     });
   };
 
+  const saveChunkToFile = async (filename: string, content: string) => {
+    try {
+      await fetch(`/api/chunks/${encodeURIComponent(filename)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      });
+    } catch (error) {
+      console.error('Error saving chunk:', error);
+    }
+  };
+
+  // Debounce map for chunk saves
+  const saveTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
   const updateChunkContent = (chunkId: string, newContent: string) => {
-    const updatedChunks = chunks.map(chunk =>
-      chunk.id === chunkId ? { ...chunk, content: newContent } : chunk
+    const chunk = chunks.find(c => c.id === chunkId);
+    if (!chunk) return;
+
+    // Update local state immediately
+    const updatedChunks = chunks.map(c =>
+      c.id === chunkId ? { ...c, content: newContent } : c
     );
     setChunks(updatedChunks);
-    const composedContent = updatedChunks.map(c => c.content).join('');
-    setContent(composedContent);
     setLastProcessedSegment(null);
-  };
 
-  const handleChunkDragStart = (index: number) => {
-    setDraggingChunkIndex(index);
-  };
-
-  const handleChunkDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    setDragOverChunkIndex(index);
-  };
-
-  const handleChunkDrop = (index: number) => {
-    if (draggingChunkIndex !== null && draggingChunkIndex !== index) {
-      const newChunks = [...chunks];
-      const [removed] = newChunks.splice(draggingChunkIndex, 1);
-      newChunks.splice(index, 0, removed);
-      setChunks(newChunks);
-      const composedContent = newChunks.map(c => c.content).join('');
-      setContent(composedContent);
-      setLastProcessedChunkId(null);
-      setLastProcessedSegment(null);
+    // Debounced save to file (500ms)
+    const existingTimeout = saveTimeouts.current.get(chunkId);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
     }
-    setDraggingChunkIndex(null);
-    setDragOverChunkIndex(null);
-  };
 
-  const handleChunkDragEnd = () => {
-    setDraggingChunkIndex(null);
-    setDragOverChunkIndex(null);
-  };
+    const timeout = setTimeout(() => {
+      saveChunkToFile(chunk.filename, newContent);
+      saveTimeouts.current.delete(chunkId);
+    }, 500);
 
-  const moveChunkUp = (index: number) => {
-    if (index === 0) return;
-    const newChunks = [...chunks];
-    [newChunks[index - 1], newChunks[index]] = [newChunks[index], newChunks[index - 1]];
-    setChunks(newChunks);
-    const composedContent = newChunks.map(c => c.content).join('');
-    setContent(composedContent);
-    setLastProcessedChunkId(null);
-    setLastProcessedSegment(null);
-  };
-
-  const moveChunkDown = (index: number) => {
-    if (index === chunks.length - 1) return;
-    const newChunks = [...chunks];
-    [newChunks[index], newChunks[index + 1]] = [newChunks[index + 1], newChunks[index]];
-    setChunks(newChunks);
-    const composedContent = newChunks.map(c => c.content).join('');
-    setContent(composedContent);
-    setLastProcessedChunkId(null);
-    setLastProcessedSegment(null);
+    saveTimeouts.current.set(chunkId, timeout);
   };
 
   const scrollToChunkInEditor = (chunkId: string) => {
@@ -440,13 +562,103 @@ function App() {
     const segment = segments[segmentIndex];
     if (!segment) return;
 
-    // Calculate line number from startIndex
-    const lineNumber = content.substring(0, segment.startIndex).split('\n').length;
+    // Use segment's chunkId directly
+    scrollToChunkInEditor(segment.chunkId);
+  };
 
-    // Find chunk containing this line
-    const chunk = chunks.find(c => lineNumber >= c.startLine && lineNumber <= c.endLine);
-    if (chunk) {
-      scrollToChunkInEditor(chunk.id);
+  const handleTextSelection = (chunkId: string) => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.toString().trim()) {
+      setTextSelection(null);
+      return;
+    }
+
+    const text = selection.toString().trim();
+    if (text.length < 2) {
+      setTextSelection(null);
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+
+    // Get the chunk content element to calculate offsets
+    const chunk = chunks.find(c => c.id === chunkId);
+    if (!chunk) return;
+
+    // Find start/end offsets within the chunk content
+    const chunkContent = chunk.content;
+    const startOffset = chunkContent.indexOf(text);
+    const endOffset = startOffset + text.length;
+
+    if (startOffset === -1) {
+      setTextSelection(null);
+      return;
+    }
+
+    setTextSelection({
+      text,
+      chunkId,
+      startOffset,
+      endOffset,
+      rect: {
+        top: rect.top + window.scrollY,
+        left: rect.left + window.scrollX,
+        width: rect.width
+      }
+    });
+  };
+
+  const clearTextSelection = () => {
+    setTextSelection(null);
+  };
+
+  const processSelectedText = async (action: 'rewrite' | 'expand' | 'summarize') => {
+    if (!textSelection) return;
+
+    const chunk = chunks.find(c => c.id === textSelection.chunkId);
+    if (!chunk) return;
+
+    setSelectionProcessing(true);
+
+    const prompts = {
+      rewrite: `Rewrite the following text to be clearer and more engaging while keeping the same meaning and length. Return ONLY the rewritten text, nothing else:\n\n${textSelection.text}`,
+      expand: `Expand the following text with more detail and explanation. Return ONLY the expanded text, nothing else:\n\n${textSelection.text}`,
+      summarize: `Summarize the following text to be more concise while keeping the key points. Return ONLY the summarized text, nothing else:\n\n${textSelection.text}`
+    };
+
+    try {
+      const response = await fetch('/api/process-segment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompts[action],
+          context: chunk.content,
+          memoryDir
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.generatedContent) {
+        // Replace the selected text in the chunk content
+        const newContent =
+          chunk.content.substring(0, textSelection.startOffset) +
+          data.generatedContent +
+          chunk.content.substring(textSelection.endOffset);
+
+        updateChunkContent(chunk.id, newContent);
+        setTextSelection(null);
+      }
+    } catch (error: any) {
+      console.error('Error processing text:', error);
+      alert('Error processing text: ' + (error.message || error));
+    } finally {
+      setSelectionProcessing(false);
     }
   };
 
@@ -469,6 +681,46 @@ function App() {
     const wrappedHighlighted = `<div class="segment-highlight">${highlightedHtml}</div>`;
 
     return { __html: beforeHtml + wrappedHighlighted + afterHtml };
+  };
+
+  // Check if module/chapter changed from previous chunk
+  const getHeadersForChunk = (chunk: Page, index: number): { moduleChanged: boolean; chapterChanged: boolean; moduleName: string; chapterName: string; pageName: string } => {
+    const moduleName = chunk.moduleTitle || '';
+    const chapterName = chunk.chapterTitle || '';
+    const pageName = chunk.title || '';
+
+    let prevModuleName = '';
+    let prevChapterName = '';
+    if (index > 0) {
+      prevModuleName = chunks[index - 1].moduleTitle || '';
+      prevChapterName = chunks[index - 1].chapterTitle || '';
+    }
+
+    return {
+      moduleChanged: moduleName !== prevModuleName,
+      chapterChanged: chapterName !== prevChapterName,
+      moduleName,
+      chapterName,
+      pageName
+    };
+  };
+
+  // Generate preview content with injected headers as markdown
+  const getPreviewContentWithHeaders = (chunk: Page, index: number): string => {
+    const headers = getHeadersForChunk(chunk, index);
+    let headerMarkdown = '';
+
+    if (headers.moduleChanged && headers.moduleName) {
+      headerMarkdown += `# ${headers.moduleName}\n\n`;
+    }
+    if (headers.chapterChanged && headers.chapterName) {
+      headerMarkdown += `## ${headers.chapterName}\n\n`;
+    }
+    if (headers.pageName) {
+      headerMarkdown += `### ${headers.pageName}\n\n`;
+    }
+
+    return headerMarkdown + (chunk.content || '');
   };
 
   const selectMemoryFile = (filename: string) => {
@@ -677,18 +929,6 @@ function App() {
     // Mark as processing
     setProcessingSegments(prev => new Set([...prev, segmentIndex]));
 
-    // Scroll to and select the text in the textarea
-    const textarea = document.querySelector('.editor-textarea') as HTMLTextAreaElement;
-    if (textarea) {
-      textarea.focus();
-      textarea.setSelectionRange(segment.startIndex, segment.endIndex);
-
-      // Scroll the selection into view
-      const linesBefore = content.substring(0, segment.startIndex).split('\n').length - 1;
-      const approxScrollTop = linesBefore * 20; // Rough estimate for scrolling
-      textarea.scrollTop = Math.max(0, approxScrollTop - 100);
-    }
-
     try {
       const selectedMemory = memoryFiles
         .filter(f => selectedMemoryFiles.has(f.filename))
@@ -703,25 +943,27 @@ function App() {
         .map(chunk => chunk.content)
         .join('\n\n');
 
-      // Find which chunk contains this segment
-      const segmentLineNumber = content.substring(0, segment.startIndex).split('\n').length;
-      const chunkIndex = chunks.findIndex(
-        chunk => segmentLineNumber >= chunk.startLine && segmentLineNumber <= chunk.endLine
-      );
+      // Use segment's chunkId directly for parallel processing support
+      const targetChunk = chunks.find(c => c.id === segment.chunkId);
 
-      if (chunkIndex === -1) {
-        throw new Error('Could not find chunk for task');
+      if (!targetChunk) {
+        throw new Error(`Could not find chunk ${segment.chunkId} for task`);
       }
 
-      const targetChunk = chunks[chunkIndex];
-      setProcessingChunkId(targetChunk.id);
+      setProcessingChunkIds(prev => new Set([...prev, targetChunk.id]));
 
-      const response = await fetch('/api/process-individual-segment', {
+      // Call the file-based processing endpoint
+      // Filename is in format: moduleDir/chapterDir/pageFile.md
+      const pathParts = targetChunk.filename.split('/');
+      const modulePath = pathParts[0] || '';
+      const chapterPath = pathParts[1] || '';
+      const pageFilename = pathParts[2] || '';
+
+      const response = await fetch(`/api/content/page/${encodeURIComponent(modulePath)}/${encodeURIComponent(chapterPath)}/${encodeURIComponent(pageFilename)}/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: targetChunk.content,
-          segmentIndex: 0, // Process the first (and likely only) segment in this chunk
+          segmentIndex: segment.localIndex,  // Use localIndex for per-chunk segment tracking
           selectedMemory,
           contextChunks
         })
@@ -733,47 +975,11 @@ function App() {
         throw new Error(data.error);
       }
 
-      if (data.processedContent && data.generatedContent) {
-        // Update only the specific chunk with the processed content
-        const updatedChunks = [...chunks];
-        updatedChunks[chunkIndex] = {
-          ...targetChunk,
-          content: data.processedContent
-        };
-        setChunks(updatedChunks);
+      // Reload chunks from files - the server already wrote the changes
+      await loadChunksFromFiles();
 
-        // Recompose the full content from all chunks
-        const newContent = updatedChunks.map(c => c.content).join('');
-        setContent(newContent);
+      setLastProcessedChunkIds(prev => new Set([...prev, targetChunk.id]));
 
-        // Calculate highlight position in the new content
-        const beforeChunks = updatedChunks.slice(0, chunkIndex).map(c => c.content).join('');
-        const highlightStart = beforeChunks.length;
-        const highlightEnd = highlightStart + data.generatedContent.length;
-
-        setLastProcessedSegment({
-          startIndex: highlightStart,
-          endIndex: highlightEnd
-        });
-        setLastProcessedChunkId(targetChunk.id);
-
-        // Clear textarea selection
-        setTimeout(() => {
-          const textarea = document.querySelector('.editor-textarea') as HTMLTextAreaElement;
-          if (textarea) {
-            textarea.setSelectionRange(0, 0);
-          }
-        }, 100);
-
-        // Re-parse segments with the new content to get updated positions
-        const parseResponse = await fetch('/api/parse', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: newContent })
-        });
-        const parseData = await parseResponse.json();
-        setSegments(parseData.segments || []);
-      }
     } catch (error: any) {
       console.error('Error processing task:', error);
       alert('Error processing task: ' + (error.message || error));
@@ -783,7 +989,11 @@ function App() {
         newSet.delete(segmentIndex);
         return newSet;
       });
-      setProcessingChunkId(null);
+      setProcessingChunkIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(segment.chunkId);
+        return newSet;
+      });
     }
   };
 
@@ -883,39 +1093,83 @@ function App() {
                 onChange={(e) => setChunkSearch(e.target.value)}
                 className="w-full mb-2 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
+              <div className="flex gap-2 mb-2">
+                <button
+                  onClick={() => setSelectedChunks(new Set(chunks.map(c => c.id)))}
+                  className="flex-1 px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                >
+                  Select All
+                </button>
+                <button
+                  onClick={() => setSelectedChunks(new Set())}
+                  className="flex-1 px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                >
+                  Unselect All
+                </button>
+              </div>
               <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
                 {chunks
-                  .filter(chunk => chunk.title.toLowerCase().includes(chunkSearch.toLowerCase()))
-                  .map((chunk) => (
-                  <div
-                    key={chunk.id}
-                    className="flex items-center space-x-2 p-2 rounded hover:bg-gray-50"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedChunks.has(chunk.id)}
-                      onChange={() => {
-                        setSelectedChunks(prev => {
-                          const newSet = new Set(prev);
-                          if (newSet.has(chunk.id)) {
-                            newSet.delete(chunk.id);
-                          } else {
-                            newSet.add(chunk.id);
-                          }
-                          return newSet;
-                        });
-                      }}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded shrink-0"
-                    />
-                    <p
-                      className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-blue-600"
-                      title={chunk.title}
-                      onClick={() => scrollToChunkInEditor(chunk.id)}
-                    >
-                      {chunk.title}
-                    </p>
-                  </div>
-                ))}
+                  .map((chunk, index) => ({ chunk, index }))
+                  .filter(({ chunk }) => chunk.title.toLowerCase().includes(chunkSearch.toLowerCase()))
+                  .map(({ chunk, index }, filteredIndex, filteredArray) => {
+                    const headers = getHeadersForChunk(chunk, index);
+                    // Check if this is first in filtered list or module/chapter changed from previous filtered item
+                    const prevFilteredItem = filteredIndex > 0 ? filteredArray[filteredIndex - 1] : null;
+                    const showModule = prevFilteredItem
+                      ? chunk.moduleTitle !== prevFilteredItem.chunk.moduleTitle
+                      : !!chunk.moduleTitle;
+                    const showChapter = prevFilteredItem
+                      ? chunk.chapterTitle !== prevFilteredItem.chunk.chapterTitle
+                      : !!chunk.chapterTitle;
+
+                    return (
+                      <div key={chunk.id}>
+                        {showModule && headers.moduleName && (
+                          <div className="flex items-center gap-2 py-2 mt-2">
+                            <div className="flex-1 border-t border-blue-300"></div>
+                            <span className="text-xs font-semibold text-blue-600 uppercase">
+                              {headers.moduleName}
+                            </span>
+                            <div className="flex-1 border-t border-blue-300"></div>
+                          </div>
+                        )}
+                        {showChapter && headers.chapterName && (
+                          <div className="flex items-center gap-2 py-1">
+                            <div className="flex-1 border-t border-gray-200"></div>
+                            <span className="text-xs text-gray-500">
+                              {headers.chapterName}
+                            </span>
+                            <div className="flex-1 border-t border-gray-200"></div>
+                          </div>
+                        )}
+                        <div className="flex items-center space-x-2 p-2 rounded hover:bg-gray-50">
+                          <input
+                            type="checkbox"
+                            checked={selectedChunks.has(chunk.id)}
+                            onChange={() => {
+                              setSelectedChunks(prev => {
+                                const newSet = new Set(prev);
+                                if (newSet.has(chunk.id)) {
+                                  newSet.delete(chunk.id);
+                                } else {
+                                  newSet.add(chunk.id);
+                                }
+                                return newSet;
+                              });
+                            }}
+                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded shrink-0"
+                          />
+                          <p
+                            className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-blue-600"
+                            title={chunk.title}
+                            onClick={() => scrollToChunkInEditor(chunk.id)}
+                          >
+                            {chunk.title}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
                 {chunks.filter(chunk => chunk.title.toLowerCase().includes(chunkSearch.toLowerCase())).length === 0 && (
                   <p className="text-sm text-gray-500 text-center py-4">
                     No chunks found
@@ -958,9 +1212,14 @@ function App() {
                     className="flex-1 min-w-0 mr-2 cursor-pointer hover:bg-gray-200 rounded p-1 -m-1"
                     onClick={() => scrollToSegmentInEditor(index)}
                   >
-                    <p className="text-xs font-medium text-gray-700 truncate">
-                      Task {index + 1}
-                    </p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-xs font-medium text-gray-700">
+                        Task {index + 1}
+                      </p>
+                      <span className="text-xs text-gray-400">
+                        ({segment.chunkTitle})
+                      </span>
+                    </div>
                     <p className="text-xs text-gray-500 truncate" title={segment.prompt}>
                       {segment.prompt.substring(0, 50)}{segment.prompt.length > 50 ? '...' : ''}
                     </p>
@@ -1146,15 +1405,11 @@ function App() {
             <div className="flex justify-between items-center">
               <h1 className="text-2xl font-bold text-gray-900">Copy Writer</h1>
               <div className="flex gap-2">
-                <label className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 cursor-pointer">
-                  Open File
-                  <input type="file" accept=".md" onChange={loadFile} className="hidden" />
-                </label>
                 <button
                   onClick={saveFile}
                   className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
                 >
-                  Save File
+                  Export
                 </button>
                 <button
                   onClick={processAllSegments}
@@ -1180,6 +1435,16 @@ function App() {
               } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
             >
               Editor
+            </button>
+            <button
+              onClick={() => setActiveTab('content')}
+              className={`${
+                activeTab === 'content'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+            >
+              Content
             </button>
             <button
               onClick={() => setActiveTab('memory')}
@@ -1226,67 +1491,55 @@ function App() {
                       placeholder="Start writing markdown with <agent> tasks..."
                     />
                   ) : (
-                    chunks.map((chunk, index) => (
-                      <div
-                        key={chunk.id}
+                    chunks.map((chunk, index) => {
+                      const headers = getHeadersForChunk(chunk, index);
+                      return (
+                        <div key={chunk.id}>
+                          {/* Module divider */}
+                          {headers.moduleChanged && headers.moduleName && (
+                            <div className="flex items-center gap-3 py-3 my-2">
+                              <div className="flex-1 border-t-2 border-blue-300"></div>
+                              <span className="text-sm font-semibold text-blue-600 uppercase tracking-wide">
+                                {headers.moduleName}
+                              </span>
+                              <div className="flex-1 border-t-2 border-blue-300"></div>
+                            </div>
+                          )}
+                          {/* Chapter divider */}
+                          {headers.chapterChanged && headers.chapterName && (
+                            <div className="flex items-center gap-3 py-2 my-1">
+                              <div className="flex-1 border-t border-gray-300"></div>
+                              <span className="text-xs font-medium text-gray-500">
+                                {headers.chapterName}
+                              </span>
+                              <div className="flex-1 border-t border-gray-300"></div>
+                            </div>
+                          )}
+                          <div
                         data-chunk-id={chunk.id}
-                        draggable={editingChunkId !== chunk.id}
-                        onDragStart={() => handleChunkDragStart(index)}
-                        onDragOver={(e) => handleChunkDragOver(e, index)}
-                        onDrop={() => handleChunkDrop(index)}
-                        onDragEnd={handleChunkDragEnd}
                         className={`border rounded-lg transition-all ${
-                          processingChunkId === chunk.id
+                          processingChunkIds.has(chunk.id)
                             ? 'border-yellow-400 border-2 bg-yellow-50'
                             : focusedChunkId === chunk.id
                             ? 'border-blue-400 border-2 bg-blue-50'
-                            : lastProcessedChunkId === chunk.id
+                            : lastProcessedChunkIds.has(chunk.id)
                             ? 'border-green-400 border-2 bg-green-50'
-                            : draggingChunkIndex === index
-                            ? 'opacity-50 border-blue-400 bg-blue-50'
-                            : dragOverChunkIndex === index
-                            ? 'border-blue-400 border-2'
                             : 'border-gray-200 hover:border-gray-300'
                         }`}
                       >
                         <div className={`flex items-center gap-2 px-3 py-2 border-b rounded-t-lg ${
-                          processingChunkId === chunk.id
+                          processingChunkIds.has(chunk.id)
                             ? 'bg-yellow-100 border-yellow-200'
                             : focusedChunkId === chunk.id
                             ? 'bg-blue-100 border-blue-200'
-                            : lastProcessedChunkId === chunk.id
+                            : lastProcessedChunkIds.has(chunk.id)
                             ? 'bg-green-100 border-green-200'
                             : 'bg-gray-50 border-gray-200'
                         }`}>
-                          <svg className="w-4 h-4 text-gray-400 shrink-0 cursor-move" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
-                          </svg>
                           <span className="text-sm font-medium text-gray-700 truncate flex-1" title={chunk.title}>
                             {chunk.title}
                           </span>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); moveChunkUp(index); }}
-                              disabled={index === 0}
-                              className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed"
-                              title="Move up"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); moveChunkDown(index); }}
-                              disabled={index === chunks.length - 1}
-                              className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed"
-                              title="Move down"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                              </svg>
-                            </button>
-                            <span className="text-xs text-gray-400 ml-1">#{index + 1}</span>
-                          </div>
+                          <span className="text-xs text-gray-400">#{index + 1}</span>
                         </div>
                         {editingChunkId === chunk.id ? (
                           <textarea
@@ -1307,26 +1560,35 @@ function App() {
                           />
                         ) : (
                           <div
-                            onClick={() => {
+                            onDoubleClick={() => {
                               setEditingChunkId(chunk.id);
-                              setLastProcessedChunkId(null);
+                              setLastProcessedChunkIds(new Set());
+                              setTextSelection(null);
                             }}
-                            className={`p-3 font-mono text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded-b-lg whitespace-pre-wrap ${
-                              processingChunkId === chunk.id
+                            onMouseUp={() => handleTextSelection(chunk.id)}
+                            className={`p-3 font-mono text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded-b-lg whitespace-pre-wrap select-text ${
+                              processingChunkIds.has(chunk.id)
                                 ? 'bg-yellow-50'
-                                : lastProcessedChunkId === chunk.id
+                                : lastProcessedChunkIds.has(chunk.id)
                                 ? 'bg-green-50'
                                 : ''
                             }`}
                             style={{ minHeight: '60px' }}
                           >
-                            {chunk.content.length > 300
-                              ? chunk.content.substring(0, 300) + '...'
-                              : chunk.content || <span className="text-gray-400 italic">Empty chunk - click to edit</span>}
+                              {chunk.content ? (
+                                <span dangerouslySetInnerHTML={{
+                                  __html: chunk.content
+                                    .replace(/</g, '&lt;')
+                                    .replace(/>/g, '&gt;')
+                                    .replace(/&lt;agent&gt;([\s\S]*?)&lt;\/agent&gt;/g, '<span class="agent-highlight">&lt;agent&gt;$1&lt;/agent&gt;</span>')
+                                }} />
+                              ) : <span className="text-gray-400 italic">Empty chunk - click to edit</span>}
+                            </div>
+                          )}
                           </div>
-                        )}
-                      </div>
-                    ))
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -1343,28 +1605,172 @@ function App() {
                   {chunks.length === 0 ? (
                     <div dangerouslySetInnerHTML={{ __html: marked.parse(content || '') as string }} />
                   ) : (
-                    chunks.map((chunk, index) => (
-                      <div key={chunk.id}>
-                        <div
-                          data-chunk-id={chunk.id}
-                          className={`transition-all duration-300 ${
-                            editingChunkId === chunk.id
-                              ? 'bg-blue-50 -mx-4 px-4 py-2 border-l-4 border-blue-400'
-                              : processingChunkId === chunk.id
-                              ? 'bg-yellow-50 -mx-4 px-4 py-2 border-l-4 border-yellow-400'
-                              : lastProcessedChunkId === chunk.id
-                              ? 'bg-green-50 -mx-4 px-4 py-2 border-l-4 border-green-400'
-                              : ''
-                          }`}
-                          dangerouslySetInnerHTML={{ __html: marked.parse(chunk.content || '') as string }}
-                        />
-                        {index < chunks.length - 1 && (
-                          <hr className="my-4 border-gray-200" />
-                        )}
-                      </div>
-                    ))
+                    chunks.map((chunk, index) => {
+                      const headers = getHeadersForChunk(chunk, index);
+                      return (
+                        <div key={chunk.id}>
+                          {/* Module divider */}
+                          {headers.moduleChanged && headers.moduleName && (
+                            <div className="flex items-center gap-4 py-4 my-4">
+                              <div className="flex-1 border-t-2 border-blue-400"></div>
+                              <span className="text-lg font-bold text-blue-600 uppercase tracking-wide">
+                                {headers.moduleName}
+                              </span>
+                              <div className="flex-1 border-t-2 border-blue-400"></div>
+                            </div>
+                          )}
+                          {/* Chapter divider */}
+                          {headers.chapterChanged && headers.chapterName && (
+                            <div className="flex items-center gap-3 py-2 my-2">
+                              <div className="flex-1 border-t border-gray-400"></div>
+                              <span className="text-sm font-semibold text-gray-600">
+                                {headers.chapterName}
+                              </span>
+                              <div className="flex-1 border-t border-gray-400"></div>
+                            </div>
+                          )}
+                          {/* Page title */}
+                          {headers.pageName && (
+                            <h3 className="text-lg font-semibold text-gray-800 mt-4 mb-2">{headers.pageName}</h3>
+                          )}
+                          <div
+                            data-chunk-id={chunk.id}
+                            className={`transition-all duration-300 ${
+                              editingChunkId === chunk.id
+                                ? 'bg-blue-50 -mx-4 px-4 py-2 border-l-4 border-blue-400'
+                                : processingChunkIds.has(chunk.id)
+                                ? 'bg-yellow-50 -mx-4 px-4 py-2 border-l-4 border-yellow-400'
+                                : lastProcessedChunkIds.has(chunk.id)
+                                ? 'bg-green-50 -mx-4 px-4 py-2 border-l-4 border-green-400'
+                                : ''
+                            }`}
+                            dangerouslySetInnerHTML={{ __html: marked.parse(chunk.content || '') as string }}
+                          />
+                          {index < chunks.length - 1 && (
+                            <hr className="my-6 border-gray-200" />
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'content' && (
+            <div className="bg-white shadow rounded-lg h-full flex flex-col">
+              <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                <h2 className="text-lg font-medium">Content Structure</h2>
+                <div className="flex gap-2">
+                  <label className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 cursor-pointer text-sm">
+                    Import
+                    <input
+                      type="file"
+                      accept=".md"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const text = await file.text();
+                        await importMarkdownAsChunks(text);
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="p-4 flex-1 overflow-y-auto">
+                {modules.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8">
+                    <p>No content yet.</p>
+                    <p className="text-sm mt-2">Import a markdown file with this format:</p>
+                    <pre className="text-xs bg-gray-100 p-3 rounded mt-2 text-left">
+{`=== Module Title ===
+
+--- Chapter Title ---
+
++++ Page Title +++
+
+Page content here...
+
++++ Another Page +++
+
+More content...`}
+                    </pre>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {modules.map((module) => (
+                      <div key={module.id} className="border border-gray-200 rounded-lg">
+                        {/* Module Header */}
+                        <button
+                          onClick={() => setExpandedModules(prev => {
+                            const next = new Set(prev);
+                            if (next.has(module.id)) next.delete(module.id);
+                            else next.add(module.id);
+                            return next;
+                          })}
+                          className="w-full flex items-center gap-2 p-3 bg-blue-50 hover:bg-blue-100 rounded-t-lg"
+                        >
+                          <svg className={`w-4 h-4 transition-transform ${expandedModules.has(module.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          <span className="font-semibold text-blue-900">{module.title}</span>
+                          <span className="text-xs text-blue-600 ml-auto">{module.chapters.length} chapters</span>
+                        </button>
+
+                        {/* Chapters */}
+                        {expandedModules.has(module.id) && (
+                          <div className="pl-4 border-t border-gray-200">
+                            {module.chapters.map((chapter) => (
+                              <div key={chapter.id} className="border-b border-gray-100 last:border-b-0">
+                                {/* Chapter Header */}
+                                <button
+                                  onClick={() => setExpandedChapters(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(chapter.id)) next.delete(chapter.id);
+                                    else next.add(chapter.id);
+                                    return next;
+                                  })}
+                                  className="w-full flex items-center gap-2 p-2 hover:bg-gray-50"
+                                >
+                                  <svg className={`w-3 h-3 transition-transform ${expandedChapters.has(chapter.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                  </svg>
+                                  <span className="font-medium text-gray-700">{chapter.title}</span>
+                                  <span className="text-xs text-gray-400 ml-auto">{chapter.pages.length} pages</span>
+                                </button>
+
+                                {/* Pages */}
+                                {expandedChapters.has(chapter.id) && (
+                                  <div className="pl-6 pb-2">
+                                    {chapter.pages.map((page) => (
+                                      <div
+                                        key={page.id}
+                                        className="flex items-center gap-2 p-1.5 text-sm text-gray-600 hover:bg-gray-50 rounded"
+                                      >
+                                        <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                        <span className="truncate flex-1">{page.title}</span>
+                                        {page.segmentCount > 0 && (
+                                          <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">
+                                            {page.segmentCount} tasks
+                                          </span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
