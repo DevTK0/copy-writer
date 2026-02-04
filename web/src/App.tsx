@@ -25,15 +25,30 @@ interface Chunk {
 }
 
 function App() {
-  const [content, setContent] = useState('');
+  const [content, setContent] = useState(() => {
+    const saved = localStorage.getItem('copywriter-content');
+    return saved || '';
+  });
   const [segments, setSegments] = useState<Segment[]>([]);
   const [processing, setProcessing] = useState(false);
   const [memoryDir, setMemoryDir] = useState('./examples/memory');
   const [memoryFiles, setMemoryFiles] = useState<MemoryFile[]>([]);
-  const [selectedMemoryFiles, setSelectedMemoryFiles] = useState<Set<string>>(new Set());
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [activeTab, setActiveTab] = useState<'editor' | 'memory' | 'images'>('editor');
-  const [selectedMemoryFile, setSelectedMemoryFile] = useState<string | null>(null);
+  const [selectedMemoryFiles, setSelectedMemoryFiles] = useState<Set<string>>(() => {
+    const saved = localStorage.getItem('copywriter-selectedMemoryFiles');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('copywriter-sidebarCollapsed');
+    return saved ? JSON.parse(saved) : false;
+  });
+  const [activeTab, setActiveTab] = useState<'editor' | 'memory' | 'images'>(() => {
+    const saved = localStorage.getItem('copywriter-activeTab');
+    return (saved as 'editor' | 'memory' | 'images') || 'editor';
+  });
+  const [selectedMemoryFile, setSelectedMemoryFile] = useState<string | null>(() => {
+    const saved = localStorage.getItem('copywriter-selectedMemoryFile');
+    return saved || null;
+  });
   const [editingMemoryContent, setEditingMemoryContent] = useState('');
   const [memoryHasChanges, setMemoryHasChanges] = useState(false);
   const [showNewFileDialog, setShowNewFileDialog] = useState(false);
@@ -47,8 +62,14 @@ function App() {
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [images, setImages] = useState<string[]>([]);
   const [imageSearch, setImageSearch] = useState('');
-  const [chunks, setChunks] = useState<Chunk[]>([]);
-  const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
+  const [chunks, setChunks] = useState<Chunk[]>(() => {
+    const saved = localStorage.getItem('copywriter-chunks');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [selectedChunks, setSelectedChunks] = useState<Set<string>>(() => {
+    const saved = localStorage.getItem('copywriter-selectedChunks');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
   const [draggingChunkIndex, setDraggingChunkIndex] = useState<number | null>(null);
 
   useEffect(() => {
@@ -59,6 +80,35 @@ function App() {
   useEffect(() => {
     parseContent();
   }, [content]);
+
+  // Persist state to localStorage
+  useEffect(() => {
+    localStorage.setItem('copywriter-content', content);
+  }, [content]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-selectedMemoryFiles', JSON.stringify(Array.from(selectedMemoryFiles)));
+  }, [selectedMemoryFiles]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-sidebarCollapsed', JSON.stringify(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-activeTab', activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-selectedMemoryFile', selectedMemoryFile || '');
+  }, [selectedMemoryFile]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-chunks', JSON.stringify(chunks));
+  }, [chunks]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-selectedChunks', JSON.stringify(Array.from(selectedChunks)));
+  }, [selectedChunks]);
 
   const loadMemoryFiles = async () => {
     try {
