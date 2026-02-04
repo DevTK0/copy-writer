@@ -1,0 +1,82 @@
+# Topics
+
+- Module 0 - Course Introduction
+    - Overview
+        - Introduction
+        - Learning Objectives
+        - Terminology
+- Module 1 - Prompt Engineering
+    - Role, Goal Context
+        - Role
+        - Goal
+        - Context
+    - Prompting Strategies
+        - Few Shot Prompting
+        - Iterative Prompting
+    - Planning Ahead
+        - Plan First
+        - Plan Modes
+- Module 2 - Context Engineering
+    - Understanding Context
+        - Context Window
+        - Context Rot
+        - Context Engineering
+    - Remembering Context
+        - AGENT.md
+        - Compactions
+        - Structured Notes
+    - Finding Context
+        - File Discovery
+        - Specialisation
+- Module 3 - Agent Development
+    - Agents
+        - Models
+        - Skills
+        - Model Context Protocol
+        - Subagents
+- Module 4 - Responsible AI
+    - Security Vulnerabilities
+        - SQL Injection
+        - Secrets
+        - Slopsquatting
+        - Context Poisoning
+    - Paper Trail
+        - AI Disclosures
+        - AI Signatures
+    - Governance & Standards
+        - Moonshot
+        - AI Verify Toolkit
+- Module 5 - AI Minded Technology Stack
+    - Code Quality
+        - Code Formatters
+        - Type Checkers
+        - Linting
+        - Code Review
+    - MCPs & Tools
+        - MCPs
+        - Custom Tools
+    - Technology Choices
+        - Object Relationship Mappers (ORM)
+        - Monorepos
+        - Documentation with Markdown
+- Module 6 - AI Powered Development
+    - Development Cycle - Git
+        - Deployment
+        - Workflows
+        - Spec Driven Development
+        - Test Driven Development
+- Module 7 - AI Enhanced Debugging & Testing
+    - Debugging
+        - Debugging Tips
+        - Debugging Tools
+    - Testing
+        - Unit Tests
+        - Integration Tests
+        - Testing Tools
+- Module 8 - AI Assisted Documentation
+    - Documentation
+        - Code Documentation
+        - Text to Diagram
+- Module 9 - Agentic Product Development
+    - Agentic Development Cycle
+        - Closed loops
