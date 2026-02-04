@@ -52,7 +52,7 @@ function runClaudeHeadless(promptFile: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const prompt = fs.readFileSync(promptFile, 'utf-8');
 
-    const claude = spawn('claude', ['--print'], {
+    const claude = spawn('claude', ['--print', '--allowedTools', 'WebSearch,WebFetch'], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
