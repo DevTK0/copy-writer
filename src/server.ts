@@ -298,6 +298,683 @@ app.delete('/api/images/:filename', (req, res) => {
   }
 });
 
+// Content hierarchy management (Module > Chapter > Page)
+const CONTENT_DIR = './examples/content';
+
+function ensureContentDir() {
+  if (!fs.existsSync(CONTENT_DIR)) {
+    fs.mkdirSync(CONTENT_DIR, { recursive: true });
+  }
+}
+
+function extractTitleFromName(name: string): string {
+  return name.replace(/^\d+-/, '').replace(/-/g, ' ');
+}
+
+function extractTitleFromContent(content: string, fallbackName: string): string {
+  // Look for <!-- title: Original Title --> at the start of content
+  const match = content.match(/^<!--\s*title:\s*(.+?)\s*-->/);
+  if (match) {
+    return match[1];
+  }
+  return extractTitleFromName(fallbackName);
+}
+
+function extractTitleParts(content: string, fallbacks: { module: string; chapter: string; page: string }): { module: string; chapter: string; page: string } {
+  const match = content.match(/^<!--\s*title:\s*(.+?)\s*-->/);
+  if (match) {
+    const parts = match[1].split(' > ');
+    return {
+      module: parts[0] || fallbacks.module,
+      chapter: parts[1] || fallbacks.chapter,
+      page: parts[2] || fallbacks.page
+    };
+  }
+  return fallbacks;
+}
+
+function getContentWithoutTitleComment(content: string): string {
+  // Remove the title comment from content for display
+  return content.replace(/^<!--\s*title:\s*.+?\s*-->\n?/, '');
+}
+
+function sortByNumericPrefix(a: string, b: string): number {
+  const numA = parseInt(a.split('-')[0]) || 0;
+  const numB = parseInt(b.split('-')[0]) || 0;
+  return numA - numB;
+}
+
+// Get full content structure
+app.get('/api/content', (req, res) => {
+  try {
+    ensureContentDir();
+
+    const modules: any[] = [];
+    const moduleDirs = fs.readdirSync(CONTENT_DIR)
+      .filter(f => fs.statSync(path.join(CONTENT_DIR, f)).isDirectory())
+      .sort(sortByNumericPrefix);
+
+    moduleDirs.forEach((moduleDir, moduleIndex) => {
+      const modulePath = path.join(CONTENT_DIR, moduleDir);
+      const chapterDirs = fs.readdirSync(modulePath)
+        .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory())
+        .sort(sortByNumericPrefix);
+
+      const chapters: any[] = [];
+      let moduleTitle = extractTitleFromName(moduleDir); // Default fallback
+
+      chapterDirs.forEach((chapterDir, chapterIndex) => {
+        const chapterPath = path.join(modulePath, chapterDir);
+        const pageFiles = fs.readdirSync(chapterPath)
+          .filter(f => f.endsWith('.md'))
+          .sort(sortByNumericPrefix);
+
+        const pages: any[] = [];
+        let chapterTitle = extractTitleFromName(chapterDir); // Default fallback
+
+        pageFiles.forEach((pageFile, pageIndex) => {
+          const pagePath = path.join(chapterPath, pageFile);
+          const rawContent = fs.readFileSync(pagePath, 'utf-8');
+          const content = getContentWithoutTitleComment(rawContent);
+          const segments = findAgentSegments(content);
+
+          // Extract titles from content comment
+          const titleParts = extractTitleParts(rawContent, {
+            module: extractTitleFromName(moduleDir),
+            chapter: extractTitleFromName(chapterDir),
+            page: extractTitleFromName(pageFile.replace('.md', ''))
+          });
+
+          // Use first page's titles for module/chapter
+          if (pageIndex === 0) {
+            chapterTitle = titleParts.chapter;
+            if (chapterIndex === 0) {
+              moduleTitle = titleParts.module;
+            }
+          }
+
+          pages.push({
+            id: `${moduleDir}/${chapterDir}/${pageFile}`,
+            filename: pageFile,
+            title: titleParts.page,
+            content,
+            order: pageIndex,
+            segmentCount: segments.length,
+            modulePath: moduleDir,
+            chapterPath: chapterDir
+          });
+        });
+
+        chapters.push({
+          id: `${moduleDir}/${chapterDir}`,
+          title: chapterTitle,
+          order: chapterIndex,
+          pages
+        });
+      });
+
+      modules.push({
+        id: moduleDir,
+        title: moduleTitle,
+        order: moduleIndex,
+        chapters
+      });
+    });
+
+    res.json({ modules });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Get a single page
+app.get('/api/content/page/:modulePath/:chapterPath/:filename', (req, res) => {
+  try {
+    const { modulePath, chapterPath, filename } = req.params;
+    const filePath = path.join(CONTENT_DIR, modulePath, chapterPath, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Page not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const segments = findAgentSegments(content);
+
+    res.json({ filename, content, segments });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Save/update a page
+app.put('/api/content/page/:modulePath/:chapterPath/:filename', (req, res) => {
+  try {
+    const { modulePath, chapterPath, filename } = req.params;
+    const { content } = req.body;
+
+    const dirPath = path.join(CONTENT_DIR, modulePath, chapterPath);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+
+    const filePath = path.join(dirPath, filename);
+    fs.writeFileSync(filePath, content, 'utf-8');
+
+    const segments = findAgentSegments(content);
+
+    res.json({ success: true, filename, segmentCount: segments.length });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Create module
+app.post('/api/content/module', (req, res) => {
+  try {
+    const { title } = req.body;
+    ensureContentDir();
+
+    const moduleDirs = fs.readdirSync(CONTENT_DIR)
+      .filter(f => fs.statSync(path.join(CONTENT_DIR, f)).isDirectory());
+
+    let maxOrder = 0;
+    moduleDirs.forEach(f => {
+      const num = parseInt(f.split('-')[0]) || 0;
+      if (num > maxOrder) maxOrder = num;
+    });
+
+    const order = String(maxOrder + 1).padStart(3, '0');
+    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const moduleDir = `${order}-${safeName}`;
+
+    fs.mkdirSync(path.join(CONTENT_DIR, moduleDir));
+
+    res.json({ success: true, id: moduleDir });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Create chapter
+app.post('/api/content/chapter', (req, res) => {
+  try {
+    const { moduleId, title } = req.body;
+    const modulePath = path.join(CONTENT_DIR, moduleId);
+
+    if (!fs.existsSync(modulePath)) {
+      return res.status(404).json({ error: 'Module not found' });
+    }
+
+    const chapterDirs = fs.readdirSync(modulePath)
+      .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory());
+
+    let maxOrder = 0;
+    chapterDirs.forEach(f => {
+      const num = parseInt(f.split('-')[0]) || 0;
+      if (num > maxOrder) maxOrder = num;
+    });
+
+    const order = String(maxOrder + 1).padStart(3, '0');
+    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const chapterDir = `${order}-${safeName}`;
+
+    fs.mkdirSync(path.join(modulePath, chapterDir));
+
+    res.json({ success: true, id: `${moduleId}/${chapterDir}` });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Create page
+app.post('/api/content/page', (req, res) => {
+  try {
+    const { moduleId, chapterId, title, content } = req.body;
+    const chapterPath = path.join(CONTENT_DIR, moduleId, chapterId);
+
+    if (!fs.existsSync(chapterPath)) {
+      return res.status(404).json({ error: 'Chapter not found' });
+    }
+
+    const pageFiles = fs.readdirSync(chapterPath).filter(f => f.endsWith('.md'));
+
+    let maxOrder = 0;
+    pageFiles.forEach(f => {
+      const num = parseInt(f.split('-')[0]) || 0;
+      if (num > maxOrder) maxOrder = num;
+    });
+
+    const order = String(maxOrder + 1).padStart(3, '0');
+    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const filename = `${order}-${safeName}.md`;
+
+    fs.writeFileSync(path.join(chapterPath, filename), content || '', 'utf-8');
+
+    res.json({ success: true, id: `${moduleId}/${chapterId}/${filename}` });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Delete module/chapter/page
+app.delete('/api/content/:type/*itemPath', (req, res) => {
+  try {
+    const { type } = req.params;
+    const itemPath = Array.isArray(req.params.itemPath)
+      ? req.params.itemPath.join('/')
+      : req.params.itemPath;
+    const fullPath = path.join(CONTENT_DIR, itemPath);
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    if (type === 'page') {
+      fs.unlinkSync(fullPath);
+    } else {
+      fs.rmSync(fullPath, { recursive: true });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Process a page
+app.post('/api/content/page/:modulePath/:chapterPath/:filename/process', async (req, res) => {
+  try {
+    const { modulePath, chapterPath, filename } = req.params;
+    const { segmentIndex, selectedMemory, contextContent } = req.body;
+
+    const filePath = path.join(CONTENT_DIR, modulePath, chapterPath, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Page not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    let memory: Map<string, string>;
+    if (selectedMemory) {
+      memory = new Map(Object.entries(selectedMemory));
+    } else {
+      memory = new Map<string, string>();
+    }
+
+    const allSegments = findAgentSegments(content);
+
+    if (segmentIndex < 0 || segmentIndex >= allSegments.length) {
+      return res.status(400).json({ error: 'Invalid segment index' });
+    }
+
+    const segment = allSegments[segmentIndex];
+
+    const generatedContent = await generateWithClaude({
+      prompt: segment.prompt,
+      context: contextContent,
+      memory
+    });
+
+    const processedContent =
+      content.substring(0, segment.startIndex) +
+      generatedContent +
+      content.substring(segment.endIndex);
+
+    fs.writeFileSync(filePath, processedContent, 'utf-8');
+
+    res.json({
+      success: true,
+      processedContent,
+      generatedContent
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Import markdown with hierarchy
+// Format: === Module === / --- Chapter --- / +++ Page +++
+app.post('/api/content/import', (req, res) => {
+  try {
+    const { content, clearExisting } = req.body;
+    ensureContentDir();
+
+    // Clear existing content if requested
+    if (clearExisting) {
+      const existingDirs = fs.readdirSync(CONTENT_DIR);
+      existingDirs.forEach(dir => {
+        const dirPath = path.join(CONTENT_DIR, dir);
+        if (fs.statSync(dirPath).isDirectory()) {
+          fs.rmSync(dirPath, { recursive: true });
+        }
+      });
+    }
+
+    // Parse content for === Module ===, --- Chapter ---, and +++ Page +++ delimiters
+    const lines = content.replace(/\r\n/g, '\n').split('\n');
+
+    interface Page { title: string; content: string }
+    interface Chapter { title: string; pages: Page[] }
+    interface Module { title: string; chapters: Chapter[] }
+
+    let currentModule: Module | null = null;
+    let currentChapter: Chapter | null = null;
+    let currentPage: Page | null = null;
+    const modules: Module[] = [];
+
+    for (const line of lines) {
+      const moduleMatch = line.match(/^===\s*(.+?)\s*===\s*$/);
+      const chapterMatch = line.match(/^---\s*(.+?)\s*---\s*$/);
+      const pageMatch = line.match(/^\+\+\+\s*(.+?)\s*\+\+\+\s*$/);
+
+      if (moduleMatch) {
+        // Save previous page/chapter/module
+        if (currentPage && currentChapter) {
+          currentChapter.pages.push(currentPage);
+        }
+        if (currentChapter && currentModule) {
+          currentModule.chapters.push(currentChapter);
+        }
+        if (currentModule) {
+          modules.push(currentModule);
+        }
+        currentModule = { title: moduleMatch[1].trim(), chapters: [] };
+        currentChapter = null;
+        currentPage = null;
+      } else if (chapterMatch) {
+        // Save previous page/chapter
+        if (currentPage && currentChapter) {
+          currentChapter.pages.push(currentPage);
+        }
+        if (currentChapter && currentModule) {
+          currentModule.chapters.push(currentChapter);
+        }
+        currentChapter = { title: chapterMatch[1].trim(), pages: [] };
+        currentPage = null;
+      } else if (pageMatch) {
+        // Save previous page
+        if (currentPage && currentChapter) {
+          currentChapter.pages.push(currentPage);
+        }
+        currentPage = { title: pageMatch[1].trim(), content: '' };
+      } else if (currentPage) {
+        currentPage.content += line + '\n';
+      }
+    }
+
+    // Save final page/chapter/module
+    if (currentPage && currentChapter) {
+      currentChapter.pages.push(currentPage);
+    }
+    if (currentChapter && currentModule) {
+      currentModule.chapters.push(currentChapter);
+    }
+    if (currentModule) {
+      modules.push(currentModule);
+    }
+
+    // Create folder structure
+    let totalPages = 0;
+    modules.forEach((module, moduleIndex) => {
+      const moduleOrder = String(moduleIndex + 1).padStart(3, '0');
+      const moduleSafeName = module.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+      const moduleDir = `${moduleOrder}-${moduleSafeName}`;
+      const modulePath = path.join(CONTENT_DIR, moduleDir);
+      fs.mkdirSync(modulePath, { recursive: true });
+
+      module.chapters.forEach((chapter, chapterIndex) => {
+        const chapterOrder = String(chapterIndex + 1).padStart(3, '0');
+        const chapterSafeName = chapter.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+        const chapterDir = `${chapterOrder}-${chapterSafeName}`;
+        const chapterPath = path.join(modulePath, chapterDir);
+        fs.mkdirSync(chapterPath, { recursive: true });
+
+        // Create individual page files
+        chapter.pages.forEach((page, pageIndex) => {
+          const pageOrder = String(pageIndex + 1).padStart(3, '0');
+          const pageSafeName = page.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+          const pageFilename = `${pageOrder}-${pageSafeName}.md`;
+          // Store original titles in a comment at the start of the file
+          const titleComment = `<!-- title: ${module.title} > ${chapter.title} > ${page.title} -->\n`;
+          fs.writeFileSync(path.join(chapterPath, pageFilename), titleComment + page.content.trim() + '\n', 'utf-8');
+          totalPages++;
+        });
+      });
+    });
+
+    res.json({
+      success: true,
+      imported: {
+        modules: modules.length,
+        chapters: modules.reduce((acc, m) => acc + m.chapters.length, 0),
+        pages: totalPages
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Legacy chunk endpoints for backward compatibility
+const CHUNKS_DIR = './examples/chunks';
+
+function ensureChunksDir() {
+  if (!fs.existsSync(CHUNKS_DIR)) {
+    fs.mkdirSync(CHUNKS_DIR, { recursive: true });
+  }
+}
+
+// List all chunks (legacy - returns flat list of all pages)
+app.get('/api/chunks', (req, res) => {
+  try {
+    ensureContentDir();
+    const chunks: any[] = [];
+
+    const moduleDirs = fs.readdirSync(CONTENT_DIR)
+      .filter(f => {
+        const stat = fs.statSync(path.join(CONTENT_DIR, f));
+        return stat.isDirectory();
+      })
+      .sort(sortByNumericPrefix);
+
+    moduleDirs.forEach(moduleDir => {
+      const modulePath = path.join(CONTENT_DIR, moduleDir);
+      const chapterDirs = fs.readdirSync(modulePath)
+        .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory())
+        .sort(sortByNumericPrefix);
+
+      chapterDirs.forEach(chapterDir => {
+        const chapterPath = path.join(modulePath, chapterDir);
+        const pageFiles = fs.readdirSync(chapterPath)
+          .filter(f => f.endsWith('.md'))
+          .sort(sortByNumericPrefix);
+
+        pageFiles.forEach(pageFile => {
+          const pagePath = path.join(chapterPath, pageFile);
+          const rawContent = fs.readFileSync(pagePath, 'utf-8');
+          const content = getContentWithoutTitleComment(rawContent);
+          const segments = findAgentSegments(content);
+
+          // Extract titles from content comment
+          const titleParts = extractTitleParts(rawContent, {
+            module: extractTitleFromName(moduleDir),
+            chapter: extractTitleFromName(chapterDir),
+            page: extractTitleFromName(pageFile.replace('.md', ''))
+          });
+
+          chunks.push({
+            id: `${moduleDir}/${chapterDir}/${pageFile}`,
+            filename: `${moduleDir}/${chapterDir}/${pageFile}`,
+            title: titleParts.page, // Just the page name
+            moduleTitle: titleParts.module,
+            chapterTitle: titleParts.chapter,
+            content,
+            order: chunks.length,
+            segmentCount: segments.length
+          });
+        });
+      });
+    });
+
+    res.json({ chunks });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Get a single chunk
+app.get('/api/chunks/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const filePath = path.join(CHUNKS_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Chunk not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const segments = findAgentSegments(content);
+
+    res.json({ filename, content, segments });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Save/update a chunk
+app.put('/api/chunks/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { content } = req.body;
+
+    ensureChunksDir();
+    const filePath = path.join(CHUNKS_DIR, filename);
+    fs.writeFileSync(filePath, content, 'utf-8');
+
+    const segments = findAgentSegments(content);
+
+    res.json({ success: true, filename, segmentCount: segments.length });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Delete a chunk
+app.delete('/api/chunks/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const filePath = path.join(CHUNKS_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Chunk not found' });
+    }
+
+    fs.unlinkSync(filePath);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Reorder chunks
+app.post('/api/chunks/reorder', (req, res) => {
+  try {
+    const { order } = req.body; // Array of filenames in new order
+
+    ensureChunksDir();
+
+    // Rename files with new order prefixes
+    const tempRenames: { from: string; to: string }[] = [];
+
+    order.forEach((filename: string, index: number) => {
+      const oldPath = path.join(CHUNKS_DIR, filename);
+      if (!fs.existsSync(oldPath)) return;
+
+      const newOrder = String(index + 1).padStart(3, '0');
+      const namePart = filename.replace(/^\d+-/, '');
+      const newFilename = `${newOrder}-${namePart}`;
+
+      if (filename !== newFilename) {
+        tempRenames.push({ from: filename, to: newFilename });
+      }
+    });
+
+    // Use temp names to avoid conflicts
+    tempRenames.forEach(({ from }, i) => {
+      const oldPath = path.join(CHUNKS_DIR, from);
+      const tempPath = path.join(CHUNKS_DIR, `_temp_${i}_${from}`);
+      fs.renameSync(oldPath, tempPath);
+    });
+
+    tempRenames.forEach(({ to }, i) => {
+      const tempPath = path.join(CHUNKS_DIR, `_temp_${i}_${tempRenames[i].from}`);
+      const newPath = path.join(CHUNKS_DIR, to);
+      fs.renameSync(tempPath, newPath);
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Process a segment in a chunk file
+app.post('/api/chunks/:filename/process', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { segmentIndex, selectedMemory, contextChunks } = req.body;
+
+    const filePath = path.join(CHUNKS_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Chunk not found' });
+    }
+
+    // Read current content from file
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    let memory: Map<string, string>;
+    if (selectedMemory) {
+      memory = new Map(Object.entries(selectedMemory));
+    } else {
+      memory = new Map<string, string>();
+    }
+
+    const allSegments = findAgentSegments(content);
+
+    if (segmentIndex < 0 || segmentIndex >= allSegments.length) {
+      return res.status(400).json({ error: 'Invalid segment index' });
+    }
+
+    const segment = allSegments[segmentIndex];
+
+    const generatedContent = await generateWithClaude({
+      prompt: segment.prompt,
+      context: contextChunks,
+      memory
+    });
+
+    const processedContent =
+      content.substring(0, segment.startIndex) +
+      generatedContent +
+      content.substring(segment.endIndex);
+
+    // Write back to file
+    fs.writeFileSync(filePath, processedContent, 'utf-8');
+
+    res.json({
+      success: true,
+      filename,
+      processedContent,
+      generatedContent
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Copy Writer server running on http://localhost:${PORT}`);
 });
