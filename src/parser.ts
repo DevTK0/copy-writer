@@ -78,10 +78,19 @@ export function findAgentSegments(content: string): AgentSegment[] {
   while ((match = agentRegex.exec(content)) !== null) {
     const fullContent = match[1];
     const promptMatch = fullContent.match(/<prompt>([\s\S]*?)<\/prompt>/);
+    const autopromptMatch = fullContent.match(/<autoprompt>([\s\S]*?)<\/autoprompt>/);
+    const researchMatch = fullContent.match(/<research>([\s\S]*?)<\/research>/);
 
-    if (promptMatch) {
+    // Match <prompt>, <autoprompt>, or <research> tags
+    if (promptMatch || autopromptMatch || researchMatch) {
+      const prompt = researchMatch
+        ? researchMatch[1].trim()
+        : autopromptMatch
+          ? autopromptMatch[1].trim()
+          : promptMatch![1].trim();
+
       segments.push({
-        prompt: promptMatch[1].trim(),
+        prompt,
         fullContent: fullContent,
         startIndex: match.index,
         endIndex: match.index + match[0].length

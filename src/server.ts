@@ -236,6 +236,172 @@ app.delete('/api/memory/:filename', (req, res) => {
   }
 });
 
+// Research endpoints
+const RESEARCH_DIR = './examples/research';
+
+function ensureResearchDir() {
+  if (!fs.existsSync(RESEARCH_DIR)) {
+    fs.mkdirSync(RESEARCH_DIR, { recursive: true });
+  }
+}
+
+app.get('/api/research', (req, res) => {
+  try {
+    ensureResearchDir();
+    const files = fs.readdirSync(RESEARCH_DIR).filter(f => f.endsWith('.md'));
+
+    const researchFiles = files.map(filename => ({
+      filename,
+      content: fs.readFileSync(path.join(RESEARCH_DIR, filename), 'utf-8')
+    }));
+
+    res.json({ files: researchFiles });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.post('/api/research/save', (req, res) => {
+  try {
+    const { filename, content } = req.body;
+    ensureResearchDir();
+
+    const filePath = path.join(RESEARCH_DIR, filename);
+    fs.writeFileSync(filePath, content, 'utf-8');
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.post('/api/research/rename', (req, res) => {
+  try {
+    const { oldFilename, newFilename } = req.body;
+
+    const oldPath = path.join(RESEARCH_DIR, oldFilename);
+    const newPath = path.join(RESEARCH_DIR, newFilename);
+
+    if (!fs.existsSync(oldPath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    if (oldFilename === newFilename) {
+      return res.json({ success: true });
+    }
+
+    if (fs.existsSync(newPath)) {
+      return res.status(409).json({ error: 'File already exists' });
+    }
+
+    fs.renameSync(oldPath, newPath);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.delete('/api/research/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const filePath = path.join(RESEARCH_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    fs.unlinkSync(filePath);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Process a segment in a research file
+app.post('/api/research/:filename/process', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { segmentIndex, segmentType, selectedMemory } = req.body;
+
+    const filePath = path.join(RESEARCH_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Research file not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    let memory: Map<string, string>;
+    if (selectedMemory) {
+      memory = new Map(Object.entries(selectedMemory));
+    } else {
+      memory = new Map<string, string>();
+    }
+
+    const allSegments = findAgentSegments(content);
+
+    if (segmentIndex < 0 || segmentIndex >= allSegments.length) {
+      return res.status(400).json({ error: 'Invalid segment index' });
+    }
+
+    const segment = allSegments[segmentIndex];
+
+    // Get surrounding content for context
+    const contentBefore = content.substring(0, segment.startIndex).trim();
+    const contentAfter = content.substring(segment.endIndex).trim();
+
+    let pageContext = '';
+    if (contentBefore) {
+      pageContext += '## Content before this section:\n\n' + contentBefore + '\n\n';
+    }
+    if (contentAfter) {
+      pageContext += '## Content after this section:\n\n' + contentAfter;
+    }
+
+    // Extract existing content from the agent block
+    const existingContent = segment.fullContent
+      .replace(/<prompt>[\s\S]*?<\/prompt>/, '')
+      .replace(/<autoprompt>[\s\S]*?<\/autoprompt>/, '')
+      .trim();
+
+    let generatedContent: string;
+
+    if (segmentType === 'autoprompt') {
+      generatedContent = await generateWithClaude({
+        prompt: segment.prompt,
+        context: pageContext || undefined,
+        memory,
+        mode: 'autoprompt'
+      });
+      generatedContent = `<agent><prompt>${generatedContent}</prompt>\n${existingContent}\n</agent>`;
+    } else {
+      generatedContent = await generateWithClaude({
+        prompt: segment.prompt,
+        existingContent: existingContent || undefined,
+        context: pageContext || undefined,
+        memory
+      });
+    }
+
+    const processedContent =
+      content.substring(0, segment.startIndex) +
+      generatedContent +
+      content.substring(segment.endIndex);
+
+    fs.writeFileSync(filePath, processedContent, 'utf-8');
+
+    res.json({
+      success: true,
+      processedContent,
+      generatedContent
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 app.get('/api/images', (req, res) => {
   try {
     const imagesDir = './examples/images';
@@ -484,7 +650,7 @@ app.post('/api/content/module', (req, res) => {
     });
 
     const order = String(maxOrder + 1).padStart(3, '0');
-    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const safeName = title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
     const moduleDir = `${order}-${safeName}`;
 
     fs.mkdirSync(path.join(CONTENT_DIR, moduleDir));
@@ -515,7 +681,7 @@ app.post('/api/content/chapter', (req, res) => {
     });
 
     const order = String(maxOrder + 1).padStart(3, '0');
-    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const safeName = title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
     const chapterDir = `${order}-${safeName}`;
 
     fs.mkdirSync(path.join(modulePath, chapterDir));
@@ -582,7 +748,7 @@ app.post('/api/content/page', (req, res) => {
     });
 
     const order = String(maxOrder + 1).padStart(3, '0');
-    const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const safeName = title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
     const filename = `${order}-${safeName}.md`;
 
     // Add title comment with correct module/chapter/page titles
@@ -666,7 +832,7 @@ app.post('/api/content/rename', (req, res) => {
     const parentDir = path.dirname(fullPath);
     const oldName = path.basename(fullPath);
     const numericPrefix = oldName.match(/^(\d+)-/)?.[1] || '001';
-    const safeName = newTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+    const safeName = newTitle.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
 
     let newName: string;
     if (type === 'page') {
@@ -761,7 +927,7 @@ app.post('/api/content/reorder', (req, res) => {
 app.post('/api/content/page/:modulePath/:chapterPath/:filename/process', async (req, res) => {
   try {
     const { modulePath, chapterPath, filename } = req.params;
-    const { segmentIndex, selectedMemory, contextContent } = req.body;
+    const { segmentIndex, segmentType, selectedMemory, contextContent } = req.body;
 
     const filePath = path.join(CONTENT_DIR, modulePath, chapterPath, filename);
 
@@ -769,7 +935,11 @@ app.post('/api/content/page/:modulePath/:chapterPath/:filename/process', async (
       return res.status(404).json({ error: 'Page not found' });
     }
 
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const rawContent = fs.readFileSync(filePath, 'utf-8');
+    // Strip title comment to match how frontend parses segments
+    const content = getContentWithoutTitleComment(rawContent);
+    // Keep the title comment to preserve it when saving
+    const titleComment = rawContent.match(/^<!--\s*title:\s*.+?\s*-->\n?/)?.[0] || '';
 
     let memory: Map<string, string>;
     if (selectedMemory) {
@@ -786,18 +956,77 @@ app.post('/api/content/page/:modulePath/:chapterPath/:filename/process', async (
 
     const segment = allSegments[segmentIndex];
 
-    const generatedContent = await generateWithClaude({
-      prompt: segment.prompt,
-      context: contextContent,
-      memory
-    });
+    // Get surrounding content from the same page for context
+    const contentBefore = content.substring(0, segment.startIndex).trim();
+    const contentAfter = content.substring(segment.endIndex).trim();
+
+    // Build page context - content before and after the agent block
+    let pageContext = '';
+    if (contentBefore) {
+      pageContext += '## Content before this section:\n\n' + contentBefore + '\n\n';
+    }
+    if (contentAfter) {
+      pageContext += '## Content after this section:\n\n' + contentAfter;
+    }
+
+    // Extract existing content from the agent block (everything except the prompt/autoprompt/research tags)
+    const existingContent = segment.fullContent
+      .replace(/<prompt>[\s\S]*?<\/prompt>/, '')
+      .replace(/<autoprompt>[\s\S]*?<\/autoprompt>/, '')
+      .replace(/<research>[\s\S]*?<\/research>/, '')
+      .trim();
+
+    let generatedContent: string;
+
+    if (segmentType === 'research') {
+      // Research mode: do comprehensive research and save to research folder
+      generatedContent = await generateWithClaude({
+        prompt: segment.prompt,
+        context: pageContext || undefined,
+        memory,
+        mode: 'research'
+      });
+
+      // Generate a filename from the prompt (first few words)
+      const safeFilename = segment.prompt
+        .substring(0, 50)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '') + '.md';
+
+      // Save to research folder
+      ensureResearchDir();
+      fs.writeFileSync(path.join(RESEARCH_DIR, safeFilename), generatedContent, 'utf-8');
+
+      // Remove the agent block from content (research is saved separately)
+      generatedContent = '';
+    } else if (segmentType === 'autoprompt') {
+      // Autoprompt mode: do research and generate a suggested prompt
+      generatedContent = await generateWithClaude({
+        prompt: segment.prompt,
+        context: pageContext || undefined,
+        memory,
+        mode: 'autoprompt'
+      });
+      // Wrap the result in a prompt tag for user to review
+      generatedContent = `<agent><prompt>${generatedContent}</prompt>\n${existingContent}\n</agent>`;
+    } else {
+      // Normal prompt mode: generate content
+      generatedContent = await generateWithClaude({
+        prompt: segment.prompt,
+        existingContent: existingContent || undefined,
+        context: pageContext || undefined,
+        memory
+      });
+    }
 
     const processedContent =
       content.substring(0, segment.startIndex) +
       generatedContent +
       content.substring(segment.endIndex);
 
-    fs.writeFileSync(filePath, processedContent, 'utf-8');
+    // Preserve the title comment when saving
+    fs.writeFileSync(filePath, titleComment + processedContent, 'utf-8');
 
     res.json({
       success: true,
@@ -894,14 +1123,14 @@ app.post('/api/content/import', (req, res) => {
     let totalPages = 0;
     modules.forEach((module, moduleIndex) => {
       const moduleOrder = String(moduleIndex + 1).padStart(3, '0');
-      const moduleSafeName = module.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+      const moduleSafeName = module.title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
       const moduleDir = `${moduleOrder}-${moduleSafeName}`;
       const modulePath = path.join(CONTENT_DIR, moduleDir);
       fs.mkdirSync(modulePath, { recursive: true });
 
       module.chapters.forEach((chapter, chapterIndex) => {
         const chapterOrder = String(chapterIndex + 1).padStart(3, '0');
-        const chapterSafeName = chapter.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+        const chapterSafeName = chapter.title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
         const chapterDir = `${chapterOrder}-${chapterSafeName}`;
         const chapterPath = path.join(modulePath, chapterDir);
         fs.mkdirSync(chapterPath, { recursive: true });
@@ -909,7 +1138,7 @@ app.post('/api/content/import', (req, res) => {
         // Create individual page files
         chapter.pages.forEach((page, pageIndex) => {
           const pageOrder = String(pageIndex + 1).padStart(3, '0');
-          const pageSafeName = page.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+          const pageSafeName = page.title.replace(/[^a-zA-Z0-9]+/g, '-').substring(0, 30);
           const pageFilename = `${pageOrder}-${pageSafeName}.md`;
           // Store original titles in a comment at the start of the file
           const titleComment = `<!-- title: ${module.title} > ${chapter.title} > ${page.title} -->\n`;
@@ -1018,19 +1247,38 @@ app.get('/api/chunks/:filename', (req, res) => {
   }
 });
 
-// Save/update a chunk
-app.put('/api/chunks/:filename', (req, res) => {
+// Save/update a chunk (supports paths like module/chapter/page.md)
+app.put('/api/chunks/*filePath', (req, res) => {
   try {
-    const { filename } = req.params;
+    const filePath = Array.isArray(req.params.filePath)
+      ? req.params.filePath.join('/')
+      : req.params.filePath;
     const { content } = req.body;
 
-    ensureChunksDir();
-    const filePath = path.join(CHUNKS_DIR, filename);
-    fs.writeFileSync(filePath, content, 'utf-8');
+    ensureContentDir();
+    const fullPath = path.join(CONTENT_DIR, filePath);
+
+    // Ensure parent directories exist
+    const parentDir = path.dirname(fullPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+
+    // Preserve the title comment if the file already exists
+    let contentToSave = content;
+    if (fs.existsSync(fullPath)) {
+      const existingContent = fs.readFileSync(fullPath, 'utf-8');
+      const titleMatch = existingContent.match(/^<!--\s*title:\s*(.+?)\s*-->\n?/);
+      if (titleMatch && !content.startsWith('<!--')) {
+        contentToSave = titleMatch[0] + content;
+      }
+    }
+
+    fs.writeFileSync(fullPath, contentToSave, 'utf-8');
 
     const segments = findAgentSegments(content);
 
-    res.json({ success: true, filename, segmentCount: segments.length });
+    res.json({ success: true, filename: filePath, segmentCount: segments.length });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }

@@ -3,5 +3,5 @@ dist/
 .env
 .DS_Store
 *.log
-examples/chunks/
-examples/content/
+examples/*
+

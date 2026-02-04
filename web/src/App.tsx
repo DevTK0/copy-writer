@@ -8,8 +8,11 @@ interface Segment {
   endIndex: number;
   processed: boolean;
   chunkId: string;
-  localIndex: number;  // Index within the chunk
+  localIndex: number;  // Index within the chunk/file
   chunkTitle: string;  // For display purposes
+  type: 'prompt' | 'autoprompt' | 'research';  // Task type
+  sourceType: 'chunk' | 'research';  // Where this segment comes from
+  sourceFilename?: string;  // Filename for research sources
 }
 
 interface MemoryFile {
@@ -51,10 +54,7 @@ interface HistorySnapshot {
 }
 
 function App() {
-  const [content, setContent] = useState(() => {
-    const saved = localStorage.getItem('copywriter-content');
-    return saved || '';
-  });
+  const [content, setContent] = useState('');
   const [segments, setSegments] = useState<Segment[]>([]);
   const [processing, setProcessing] = useState(false);
   const [memoryDir, setMemoryDir] = useState('./examples/memory');
@@ -63,13 +63,23 @@ function App() {
     const saved = localStorage.getItem('copywriter-selectedMemoryFiles');
     return saved ? new Set(JSON.parse(saved)) : new Set();
   });
+  const [researchFiles, setResearchFiles] = useState<MemoryFile[]>([]);
+  const [selectedResearchFiles, setSelectedResearchFiles] = useState<Set<string>>(() => {
+    const saved = localStorage.getItem('copywriter-selectedResearchFiles');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
+  const [selectedResearchFile, setSelectedResearchFile] = useState<string | null>(null);
+  const [editingResearchContent, setEditingResearchContent] = useState('');
+  const [researchHasChanges, setResearchHasChanges] = useState(false);
+  const [editingResearchFileName, setEditingResearchFileName] = useState(false);
+  const [newResearchFileName, setNewResearchFileName] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     const saved = localStorage.getItem('copywriter-sidebarCollapsed');
     return saved ? JSON.parse(saved) : false;
   });
-  const [activeTab, setActiveTab] = useState<'editor' | 'content' | 'memory' | 'images'>(() => {
+  const [activeTab, setActiveTab] = useState<'editor' | 'content' | 'memory' | 'research' | 'images'>(() => {
     const saved = localStorage.getItem('copywriter-activeTab');
-    return (saved as 'editor' | 'content' | 'memory' | 'images') || 'editor';
+    return (saved as 'editor' | 'content' | 'memory' | 'research' | 'images') || 'editor';
   });
   const [selectedMemoryFile, setSelectedMemoryFile] = useState<string | null>(() => {
     const saved = localStorage.getItem('copywriter-selectedMemoryFile');
@@ -83,7 +93,10 @@ function App() {
   const [autoGenDescription, setAutoGenDescription] = useState('');
   const [editingFileName, setEditingFileName] = useState(false);
   const [newFileNameEdit, setNewFileNameEdit] = useState('');
-  const [processingSegments, setProcessingSegments] = useState<Set<number>>(new Set());
+  const [processingSegments, setProcessingSegments] = useState<Set<string>>(new Set());
+
+  // Generate stable ID for a segment
+  const getSegmentId = (segment: Segment) => `${segment.sourceType}:${segment.chunkId}:${segment.localIndex}`;
   const [lastProcessedSegment, setLastProcessedSegment] = useState<{startIndex: number, endIndex: number} | null>(null);
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [images, setImages] = useState<string[]>([]);
@@ -92,7 +105,7 @@ function App() {
   const [modules, setModules] = useState<Module[]>([]);
   const [chunks, setChunks] = useState<Page[]>([]); // Flattened list of pages for editor
   const [selectedChunks, setSelectedChunks] = useState<Set<string>>(new Set());
-  const [openAccordion, setOpenAccordion] = useState<'memory' | 'chunks' | 'segments' | 'images' | 'history'>('memory');
+  const [openAccordion, setOpenAccordion] = useState<'memory' | 'research' | 'chunks' | 'segments' | 'images' | 'history'>('memory');
   const [editingChunkId, setEditingChunkId] = useState<string | null>(null);
   const [lastProcessedChunkIds, setLastProcessedChunkIds] = useState<Set<string>>(new Set());
   const [processingChunkIds, setProcessingChunkIds] = useState<Set<string>>(new Set());
@@ -101,10 +114,7 @@ function App() {
   const [expandedChapters, setExpandedChapters] = useState<Set<string>>(new Set());
   const [editingContentItem, setEditingContentItem] = useState<{ type: 'module' | 'chapter' | 'page'; id: string } | null>(null);
   const [editingContentTitle, setEditingContentTitle] = useState('');
-  const [history, setHistory] = useState<HistorySnapshot[]>(() => {
-    const saved = localStorage.getItem('copywriter-history');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [history, setHistory] = useState<HistorySnapshot[]>([]);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -112,6 +122,7 @@ function App() {
   useEffect(() => {
     loadMemoryFiles();
     loadImages();
+    loadResearchFiles();
     loadChunksFromFiles();
   }, []);
 
@@ -132,8 +143,93 @@ function App() {
     setContent(composedContent);
   }, [chunks]);
 
+  // Re-parse segments when chunks or research files change
+  useEffect(() => {
+    const allSegments: Segment[] = [];
+    let globalIndex = 0;
+
+    // Parse chunks
+    for (const chunk of chunks) {
+      const agentRegex = /<agent>([\s\S]*?)<\/agent>/g;
+      let match;
+      let localIndex = 0;
+
+      while ((match = agentRegex.exec(chunk.content)) !== null) {
+        const fullContent = match[1];
+        const promptMatch = fullContent.match(/<prompt>([\s\S]*?)<\/prompt>/);
+        const autopromptMatch = fullContent.match(/<autoprompt>([\s\S]*?)<\/autoprompt>/);
+        const researchMatch = fullContent.match(/<research>([\s\S]*?)<\/research>/);
+
+        const type: 'prompt' | 'autoprompt' | 'research' = researchMatch
+          ? 'research'
+          : autopromptMatch ? 'autoprompt' : 'prompt';
+        const prompt = researchMatch
+          ? researchMatch[1].trim()
+          : autopromptMatch
+            ? autopromptMatch[1].trim()
+            : (promptMatch ? promptMatch[1].trim() : fullContent.trim());
+
+        allSegments.push({
+          index: globalIndex++,
+          prompt,
+          startIndex: match.index,
+          endIndex: match.index + match[0].length,
+          processed: false,
+          chunkId: chunk.id,
+          localIndex: localIndex++,
+          chunkTitle: chunk.title,
+          type,
+          sourceType: 'chunk'
+        });
+      }
+    }
+
+    // Parse research files
+    for (const file of researchFiles) {
+      const agentRegex = /<agent>([\s\S]*?)<\/agent>/g;
+      let match;
+      let localIndex = 0;
+
+      while ((match = agentRegex.exec(file.content)) !== null) {
+        const fullContent = match[1];
+        const promptMatch = fullContent.match(/<prompt>([\s\S]*?)<\/prompt>/);
+        const autopromptMatch = fullContent.match(/<autoprompt>([\s\S]*?)<\/autoprompt>/);
+
+        const type: 'prompt' | 'autoprompt' | 'research' = autopromptMatch ? 'autoprompt' : 'prompt';
+        const prompt = autopromptMatch
+          ? autopromptMatch[1].trim()
+          : (promptMatch ? promptMatch[1].trim() : fullContent.trim());
+
+        allSegments.push({
+          index: globalIndex++,
+          prompt,
+          startIndex: match.index,
+          endIndex: match.index + match[0].length,
+          processed: false,
+          chunkId: file.filename,
+          localIndex: localIndex++,
+          chunkTitle: `[R] ${file.filename}`,
+          type,
+          sourceType: 'research',
+          sourceFilename: file.filename
+        });
+      }
+    }
+
+    setSegments(allSegments);
+  }, [chunks, researchFiles]);
+
+  // Sync research content when files are reloaded
+  useEffect(() => {
+    if (selectedResearchFile && researchFiles.length > 0) {
+      const file = researchFiles.find(f => f.filename === selectedResearchFile);
+      if (file && file.content !== editingResearchContent && !researchHasChanges) {
+        setEditingResearchContent(file.content);
+      }
+    }
+  }, [researchFiles, selectedResearchFile]);
+
   // Parse segments when content changes - only if not using chunk-based system
-  // When chunks are loaded, segments are parsed per-chunk in loadChunksFromFiles
   useEffect(() => {
     if (!editingChunkId && content && chunks.length === 0) {
       parseSegments();
@@ -141,13 +237,15 @@ function App() {
   }, [content, editingChunkId, chunks.length]);
 
   // Persist state to localStorage
-  useEffect(() => {
-    localStorage.setItem('copywriter-content', content);
-  }, [content]);
+  // Note: content is derived from chunks which are persisted to files
 
   useEffect(() => {
     localStorage.setItem('copywriter-selectedMemoryFiles', JSON.stringify(Array.from(selectedMemoryFiles)));
   }, [selectedMemoryFiles]);
+
+  useEffect(() => {
+    localStorage.setItem('copywriter-selectedResearchFiles', JSON.stringify(Array.from(selectedResearchFiles)));
+  }, [selectedResearchFiles]);
 
   useEffect(() => {
     localStorage.setItem('copywriter-sidebarCollapsed', JSON.stringify(sidebarCollapsed));
@@ -161,19 +259,13 @@ function App() {
     localStorage.setItem('copywriter-selectedMemoryFile', selectedMemoryFile || '');
   }, [selectedMemoryFile]);
 
-  useEffect(() => {
-    localStorage.setItem('copywriter-chunks', JSON.stringify(chunks));
-  }, [chunks]);
+  // Note: chunks are persisted to files, no need for localStorage backup
 
   useEffect(() => {
     localStorage.setItem('copywriter-selectedChunks', JSON.stringify(Array.from(selectedChunks)));
   }, [selectedChunks]);
 
-  useEffect(() => {
-    // Limit history to last 50 entries to avoid storage issues
-    const limitedHistory = history.slice(-50);
-    localStorage.setItem('copywriter-history', JSON.stringify(limitedHistory));
-  }, [history]);
+  // Note: history is session-only, not persisted to localStorage to avoid quota issues
 
   const saveSnapshot = (label: string) => {
     const snapshot: HistorySnapshot = {
@@ -186,14 +278,17 @@ function App() {
     setHistory(prev => [...prev, snapshot]);
   };
 
-  const revertToSnapshot = (snapshotId: string) => {
+  const revertToSnapshot = async (snapshotId: string) => {
     const snapshot = history.find(s => s.id === snapshotId);
     if (snapshot) {
-      // Save current state before reverting
-      saveSnapshot('Before revert');
       setContent(snapshot.content);
       setChunks(snapshot.chunks);
       setShowHistoryPanel(false);
+
+      // Save reverted chunks back to files to keep server in sync
+      for (const chunk of snapshot.chunks) {
+        await saveChunkToFile(chunk.filename, chunk.content);
+      }
     }
   };
 
@@ -224,6 +319,16 @@ function App() {
     }
   };
 
+  const loadResearchFiles = async () => {
+    try {
+      const response = await fetch('/api/research');
+      const data = await response.json();
+      setResearchFiles(data.files || []);
+    } catch (error) {
+      console.error('Error loading research files:', error);
+    }
+  };
+
   const loadChunksFromFiles = async () => {
     try {
       // Load flattened chunks for editor
@@ -233,35 +338,7 @@ function App() {
         setChunks(chunksData.chunks);
         setSelectedChunks(new Set());
 
-        // Parse segments per-chunk for parallel processing support
-        const allSegments: Segment[] = [];
-        let globalIndex = 0;
-
-        for (const chunk of chunksData.chunks as Page[]) {
-          // Find all <agent> segments in this chunk
-          const agentRegex = /<agent>([\s\S]*?)<\/agent>/g;
-          let match;
-          let localIndex = 0;
-
-          while ((match = agentRegex.exec(chunk.content)) !== null) {
-            const fullContent = match[1];
-            const promptMatch = fullContent.match(/<prompt>([\s\S]*?)<\/prompt>/);
-            const prompt = promptMatch ? promptMatch[1].trim() : fullContent.trim();
-
-            allSegments.push({
-              index: globalIndex++,
-              prompt,
-              startIndex: match.index,
-              endIndex: match.index + match[0].length,
-              processed: false,
-              chunkId: chunk.id,
-              localIndex: localIndex++,
-              chunkTitle: chunk.title
-            });
-          }
-        }
-
-        setSegments(allSegments);
+        // Segments are parsed by the useEffect that watches chunks and researchFiles
 
         // Also update combined content for preview
         const combinedContent = chunksData.chunks.map((c: Page) => c.content).join('\n\n');
@@ -309,6 +386,18 @@ function App() {
       if (data.error) {
         throw new Error(data.error);
       }
+
+      // Clear history and persisted storage on import
+      setHistory([]);
+      setSelectedChunks(new Set());
+      setLastProcessedChunkIds(new Set());
+      setLastProcessedSegment(null);
+
+      // Clear localStorage
+      localStorage.removeItem('copywriter-history');
+      localStorage.removeItem('copywriter-chunks');
+      localStorage.removeItem('copywriter-selectedChunks');
+      localStorage.removeItem('copywriter-content');
 
       await loadChunksFromFiles();
       alert(`Imported ${data.imported.modules} modules with ${data.imported.chapters} chapters successfully`);
@@ -582,7 +671,7 @@ function App() {
 
   const processAllSegments = async () => {
     // Save snapshot before processing all
-    saveSnapshot('Before processing all tasks');
+    saveSnapshot('All tasks');
 
     setProcessing(true);
     const originalContent = content;
@@ -1001,20 +1090,23 @@ function App() {
 
   const processIndividualSegment = async (segmentIndex: number) => {
     const segment = segments[segmentIndex];
+    const segmentId = getSegmentId(segment);
 
     // Save snapshot before processing
-    saveSnapshot(`Before processing Task ${segmentIndex + 1}`);
+    saveSnapshot(segment.chunkTitle);
 
-    // Mark as processing
-    setProcessingSegments(prev => new Set([...prev, segmentIndex]));
+    // Mark as processing using stable ID
+    setProcessingSegments(prev => new Set([...prev, segmentId]));
 
     try {
-      const selectedMemory = memoryFiles
+      // Combine memory files and research files into selectedMemory
+      const selectedMemory: Record<string, string> = {};
+      memoryFiles
         .filter(f => selectedMemoryFiles.has(f.filename))
-        .reduce((acc, f) => {
-          acc[f.filename] = f.content;
-          return acc;
-        }, {} as Record<string, string>);
+        .forEach(f => { selectedMemory[f.filename] = f.content; });
+      researchFiles
+        .filter(f => selectedResearchFiles.has(f.filename))
+        .forEach(f => { selectedMemory[`[Research] ${f.filename}`] = f.content; });
 
       // Get selected chunks as context
       const contextChunks = chunks
@@ -1022,31 +1114,47 @@ function App() {
         .map(chunk => chunk.content)
         .join('\n\n');
 
-      // Use segment's chunkId directly for parallel processing support
-      const targetChunk = chunks.find(c => c.id === segment.chunkId);
+      let response: Response;
 
-      if (!targetChunk) {
-        throw new Error(`Could not find chunk ${segment.chunkId} for task`);
+      if (segment.sourceType === 'research' && segment.sourceFilename) {
+        // Process research file segment
+        response = await fetch(`/api/research/${encodeURIComponent(segment.sourceFilename)}/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            segmentIndex: segment.localIndex,
+            segmentType: segment.type,
+            selectedMemory
+          })
+        });
+      } else {
+        // Process chunk segment
+        const targetChunk = chunks.find(c => c.id === segment.chunkId);
+
+        if (!targetChunk) {
+          throw new Error(`Could not find chunk ${segment.chunkId} for task`);
+        }
+
+        setProcessingChunkIds(prev => new Set([...prev, targetChunk.id]));
+
+        // Call the file-based processing endpoint
+        // Filename is in format: moduleDir/chapterDir/pageFile.md
+        const pathParts = targetChunk.filename.split('/');
+        const modulePath = pathParts[0] || '';
+        const chapterPath = pathParts[1] || '';
+        const pageFilename = pathParts[2] || '';
+
+        response = await fetch(`/api/content/page/${encodeURIComponent(modulePath)}/${encodeURIComponent(chapterPath)}/${encodeURIComponent(pageFilename)}/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            segmentIndex: segment.localIndex,
+            segmentType: segment.type,
+            selectedMemory,
+            contextChunks
+          })
+        });
       }
-
-      setProcessingChunkIds(prev => new Set([...prev, targetChunk.id]));
-
-      // Call the file-based processing endpoint
-      // Filename is in format: moduleDir/chapterDir/pageFile.md
-      const pathParts = targetChunk.filename.split('/');
-      const modulePath = pathParts[0] || '';
-      const chapterPath = pathParts[1] || '';
-      const pageFilename = pathParts[2] || '';
-
-      const response = await fetch(`/api/content/page/${encodeURIComponent(modulePath)}/${encodeURIComponent(chapterPath)}/${encodeURIComponent(pageFilename)}/process`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          segmentIndex: segment.localIndex,  // Use localIndex for per-chunk segment tracking
-          selectedMemory,
-          contextChunks
-        })
-      });
 
       const data = await response.json();
 
@@ -1054,10 +1162,17 @@ function App() {
         throw new Error(data.error);
       }
 
-      // Reload chunks from files - the server already wrote the changes
-      await loadChunksFromFiles();
-
-      setLastProcessedChunkIds(prev => new Set([...prev, targetChunk.id]));
+      // Reload data based on source type
+      if (segment.sourceType === 'research') {
+        await loadResearchFiles();
+      } else {
+        await loadChunksFromFiles();
+        // Reload research files if this was a research segment (creates new research file)
+        if (segment.type === 'research') {
+          await loadResearchFiles();
+        }
+        setLastProcessedChunkIds(prev => new Set([...prev, segment.chunkId]));
+      }
 
     } catch (error: any) {
       console.error('Error processing task:', error);
@@ -1065,7 +1180,7 @@ function App() {
     } finally {
       setProcessingSegments(prev => {
         const newSet = new Set(prev);
-        newSet.delete(segmentIndex);
+        newSet.delete(segmentId);
         return newSet;
       });
       setProcessingChunkIds(prev => {
@@ -1135,6 +1250,89 @@ function App() {
                 {memoryFiles.length === 0 && (
                   <p className="text-sm text-gray-500 text-center py-4">
                     No memory files found
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Research Section */}
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion('research')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'research' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">Research</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {selectedResearchFiles.size} of {researchFiles.length} selected
+              </p>
+            </div>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'research' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'research' && (
+            <div className="px-4 pb-4">
+              <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+                {researchFiles.map((file) => (
+                  <div
+                    key={file.filename}
+                    className={`flex items-center space-x-2 p-2 rounded ${
+                      selectedResearchFile === file.filename ? 'bg-amber-50' : ''
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedResearchFiles.has(file.filename)}
+                      onChange={() => {
+                        setSelectedResearchFiles(prev => {
+                          const newSet = new Set(prev);
+                          if (newSet.has(file.filename)) {
+                            newSet.delete(file.filename);
+                          } else {
+                            newSet.add(file.filename);
+                          }
+                          return newSet;
+                        });
+                      }}
+                      className="h-4 w-4 text-amber-600 focus:ring-amber-500 border-gray-300 rounded"
+                    />
+                    <p
+                      className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-amber-600"
+                      onClick={() => {
+                        setSelectedResearchFile(file.filename);
+                        setEditingResearchContent(file.content);
+                        setResearchHasChanges(false);
+                        setActiveTab('research');
+                      }}
+                    >
+                      {file.filename}
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (confirm(`Delete ${file.filename}?`)) {
+                          fetch(`/api/research/${encodeURIComponent(file.filename)}`, { method: 'DELETE' })
+                            .then(() => loadResearchFiles());
+                        }
+                      }}
+                      className="text-gray-400 hover:text-red-500"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+                {researchFiles.length === 0 && (
+                  <p className="text-sm text-gray-500 text-center py-4">
+                    No research files yet
                   </p>
                 )}
               </div>
@@ -1291,28 +1489,51 @@ function App() {
                     className="flex-1 min-w-0 mr-2 cursor-pointer hover:bg-gray-200 rounded p-1 -m-1"
                     onClick={() => scrollToSegmentInEditor(index)}
                   >
-                    <div className="flex items-center gap-1">
-                      <p className="text-xs font-medium text-gray-700">
-                        Task {index + 1}
-                      </p>
-                      <span className="text-xs text-gray-400">
-                        ({segment.chunkTitle})
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        segment.type === 'research'
+                          ? 'bg-amber-100 text-amber-700'
+                          : segment.type === 'autoprompt'
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {segment.type === 'research' ? 'Research' : segment.type === 'autoprompt' ? 'Auto' : 'Write'}
                       </span>
+                      <p className="text-xs font-medium text-gray-700 truncate" title={segment.chunkTitle}>
+                        {segment.chunkTitle}
+                      </p>
                     </div>
-                    <p className="text-xs text-gray-500 truncate" title={segment.prompt}>
+                    <p className="text-xs text-gray-500 truncate mt-0.5" title={segment.prompt}>
                       {segment.prompt.substring(0, 50)}{segment.prompt.length > 50 ? '...' : ''}
                     </p>
                   </div>
                   <button
                     onClick={() => processIndividualSegment(index)}
-                    disabled={processingSegments.has(index)}
-                    className={`px-2 py-1 text-xs rounded whitespace-nowrap ${
+                    disabled={processingSegments.has(getSegmentId(segment)) || segment.processed}
+                    className={`p-1.5 rounded ${
                       segment.processed
-                        ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                        : 'bg-blue-500 text-white hover:bg-blue-600'
+                        ? 'bg-green-100 text-green-600'
+                        : segment.type === 'research'
+                          ? 'bg-amber-500 text-white hover:bg-amber-600'
+                          : segment.type === 'autoprompt'
+                            ? 'bg-purple-500 text-white hover:bg-purple-600'
+                            : 'bg-blue-500 text-white hover:bg-blue-600'
                     } disabled:opacity-50 disabled:cursor-not-allowed`}
                   >
-                    {processingSegments.has(index) ? '...' : segment.processed ? 'Done' : 'Process'}
+                    {processingSegments.has(getSegmentId(segment)) ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    ) : segment.processed ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
                   </button>
                 </div>
               ))}
@@ -1536,6 +1757,16 @@ function App() {
               Memory
             </button>
             <button
+              onClick={() => setActiveTab('research')}
+              className={`${
+                activeTab === 'research'
+                  ? 'border-amber-500 text-amber-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+            >
+              Research
+            </button>
+            <button
               onClick={() => setActiveTab('images')}
               className={`${
                 activeTab === 'images'
@@ -1708,7 +1939,7 @@ function App() {
                           )}
                           {/* Page title */}
                           {headers.pageName && (
-                            <h3 className="text-lg font-semibold text-gray-800 mt-4 mb-2">{headers.pageName}</h3>
+                            <h1 className="text-2xl font-bold text-gray-900 mt-4 mb-3">{headers.pageName}</h1>
                           )}
                           <div
                             data-chunk-id={chunk.id}
@@ -2198,6 +2429,115 @@ More content...`}
                 ) : (
                   <div className="flex items-center justify-center h-full text-gray-500">
                     Select a memory file from the sidebar to edit
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'research' && (
+            <div className="bg-white shadow rounded-lg h-full flex flex-col">
+              <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                <div className="flex items-center gap-2 flex-1">
+                  {editingResearchFileName && selectedResearchFile ? (
+                    <input
+                      type="text"
+                      value={newResearchFileName}
+                      onChange={(e) => setNewResearchFileName(e.target.value)}
+                      onBlur={async () => {
+                        if (newResearchFileName && newResearchFileName !== selectedResearchFile) {
+                          const finalName = newResearchFileName.endsWith('.md') ? newResearchFileName : `${newResearchFileName}.md`;
+                          await fetch('/api/research/rename', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              oldFilename: selectedResearchFile,
+                              newFilename: finalName
+                            })
+                          });
+                          setSelectedResearchFile(finalName);
+                          loadResearchFiles();
+                        }
+                        setEditingResearchFileName(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.currentTarget.blur();
+                        } else if (e.key === 'Escape') {
+                          setEditingResearchFileName(false);
+                        }
+                      }}
+                      className="text-lg font-medium border-b border-amber-500 focus:outline-none bg-transparent"
+                      autoFocus
+                    />
+                  ) : (
+                    <h2
+                      className="text-lg font-medium cursor-pointer hover:text-amber-600"
+                      onClick={() => {
+                        if (selectedResearchFile) {
+                          setNewResearchFileName(selectedResearchFile.replace('.md', ''));
+                          setEditingResearchFileName(true);
+                        }
+                      }}
+                      title="Click to rename"
+                    >
+                      {selectedResearchFile || 'Research'}
+                    </h2>
+                  )}
+                </div>
+                {selectedResearchFile && (
+                  <div className="flex gap-2">
+                    {researchHasChanges && (
+                      <button
+                        onClick={async () => {
+                          await fetch('/api/research/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              filename: selectedResearchFile,
+                              content: editingResearchContent
+                            })
+                          });
+                          setResearchHasChanges(false);
+                          loadResearchFiles();
+                        }}
+                        className="px-3 py-1 text-sm bg-amber-500 text-white rounded hover:bg-amber-600"
+                      >
+                        Save
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        if (confirm(`Delete ${selectedResearchFile}?`)) {
+                          fetch(`/api/research/${encodeURIComponent(selectedResearchFile)}`, { method: 'DELETE' })
+                            .then(() => {
+                              setSelectedResearchFile(null);
+                              setEditingResearchContent('');
+                              loadResearchFiles();
+                            });
+                        }
+                      }}
+                      className="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="flex-1 overflow-hidden">
+                {selectedResearchFile ? (
+                  <textarea
+                    value={editingResearchContent}
+                    onChange={(e) => {
+                      setEditingResearchContent(e.target.value);
+                      setResearchHasChanges(true);
+                    }}
+                    className="w-full h-full p-4 font-mono text-sm resize-none border-none focus:outline-none focus:ring-0"
+                    placeholder="Research content..."
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-500">
+                    Select a research file from the sidebar to edit
                   </div>
                 )}
               </div>
