@@ -71,6 +71,11 @@ function App() {
     return saved ? new Set(JSON.parse(saved)) : new Set();
   });
   const [draggingChunkIndex, setDraggingChunkIndex] = useState<number | null>(null);
+  const [openAccordion, setOpenAccordion] = useState<'memory' | 'chunks' | 'segments' | 'images'>('memory');
+  const [editingChunkId, setEditingChunkId] = useState<string | null>(null);
+  const [dragOverChunkIndex, setDragOverChunkIndex] = useState<number | null>(null);
+  const [lastProcessedChunkId, setLastProcessedChunkId] = useState<string | null>(null);
+  const [processingChunkId, setProcessingChunkId] = useState<string | null>(null);
 
   useEffect(() => {
     loadMemoryFiles();
@@ -249,9 +254,9 @@ function App() {
         throw new Error('No processed content returned from server');
       }
     } catch (error: any) {
-      console.error('Error processing segments:', error);
+      console.error('Error processing tasks:', error);
       setContent(originalContent);
-      alert('Error processing segments: ' + (error.message || error));
+      alert('Error processing tasks: ' + (error.message || error));
     } finally {
       setProcessing(false);
     }
@@ -287,6 +292,67 @@ function App() {
       }
       return newSet;
     });
+  };
+
+  const updateChunkContent = (chunkId: string, newContent: string) => {
+    const updatedChunks = chunks.map(chunk =>
+      chunk.id === chunkId ? { ...chunk, content: newContent } : chunk
+    );
+    setChunks(updatedChunks);
+    const composedContent = updatedChunks.map(c => c.content).join('');
+    setContent(composedContent);
+    setLastProcessedSegment(null);
+  };
+
+  const handleChunkDragStart = (index: number) => {
+    setDraggingChunkIndex(index);
+  };
+
+  const handleChunkDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    setDragOverChunkIndex(index);
+  };
+
+  const handleChunkDrop = (index: number) => {
+    if (draggingChunkIndex !== null && draggingChunkIndex !== index) {
+      const newChunks = [...chunks];
+      const [removed] = newChunks.splice(draggingChunkIndex, 1);
+      newChunks.splice(index, 0, removed);
+      setChunks(newChunks);
+      const composedContent = newChunks.map(c => c.content).join('');
+      setContent(composedContent);
+      setLastProcessedChunkId(null);
+      setLastProcessedSegment(null);
+    }
+    setDraggingChunkIndex(null);
+    setDragOverChunkIndex(null);
+  };
+
+  const handleChunkDragEnd = () => {
+    setDraggingChunkIndex(null);
+    setDragOverChunkIndex(null);
+  };
+
+  const moveChunkUp = (index: number) => {
+    if (index === 0) return;
+    const newChunks = [...chunks];
+    [newChunks[index - 1], newChunks[index]] = [newChunks[index], newChunks[index - 1]];
+    setChunks(newChunks);
+    const composedContent = newChunks.map(c => c.content).join('');
+    setContent(composedContent);
+    setLastProcessedChunkId(null);
+    setLastProcessedSegment(null);
+  };
+
+  const moveChunkDown = (index: number) => {
+    if (index === chunks.length - 1) return;
+    const newChunks = [...chunks];
+    [newChunks[index], newChunks[index + 1]] = [newChunks[index + 1], newChunks[index]];
+    setChunks(newChunks);
+    const composedContent = newChunks.map(c => c.content).join('');
+    setContent(composedContent);
+    setLastProcessedChunkId(null);
+    setLastProcessedSegment(null);
   };
 
   const renderPreview = () => {
@@ -347,6 +413,34 @@ function App() {
     } catch (error) {
       console.error('Error saving memory file:', error);
       alert('Error saving memory file');
+    }
+  };
+
+  const deleteMemoryFile = async () => {
+    if (!selectedMemoryFile) return;
+    if (!confirm(`Delete "${selectedMemoryFile}"? This cannot be undone.`)) return;
+
+    try {
+      const response = await fetch(`/api/memory/${encodeURIComponent(selectedMemoryFile)}`, {
+        method: 'DELETE'
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete memory file');
+      }
+
+      setMemoryFiles(prev => prev.filter(f => f.filename !== selectedMemoryFile));
+      setSelectedMemoryFiles(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(selectedMemoryFile);
+        return newSet;
+      });
+      setSelectedMemoryFile(null);
+      setEditingMemoryContent('');
+      setMemoryHasChanges(false);
+    } catch (error) {
+      console.error('Error deleting memory file:', error);
+      alert('Error deleting memory file');
     }
   };
 
@@ -429,7 +523,7 @@ function App() {
   };
 
   const autoGenerateMemoryFile = async () => {
-    if (!autoGenDescription.trim()) return;
+    if (!autoGenDescription.trim() || !selectedMemoryFile) return;
 
     setProcessing(true);
     try {
@@ -444,14 +538,12 @@ function App() {
       const data = await response.json();
 
       if (data.generatedContent) {
-        const filename = `auto-${Date.now()}.md`;
-
-        // Save to filesystem
+        // Save to filesystem with the selected filename
         const saveResponse = await fetch('/api/memory/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            filename,
+            filename: selectedMemoryFile,
             content: data.generatedContent
           })
         });
@@ -460,12 +552,18 @@ function App() {
           throw new Error('Failed to save generated memory file');
         }
 
-        setMemoryFiles(prev => [...prev, { filename, content: data.generatedContent }]);
-        setSelectedMemoryFiles(prev => new Set([...prev, filename]));
+        // Update the file in state
+        setMemoryFiles(prev =>
+          prev.map(f =>
+            f.filename === selectedMemoryFile
+              ? { ...f, content: data.generatedContent }
+              : f
+          )
+        );
+        setEditingMemoryContent(data.generatedContent);
+        setMemoryHasChanges(false);
         setAutoGenDescription('');
         setShowAutoGenDialog(false);
-        selectMemoryFile(filename);
-        setActiveTab('memory');
       }
     } catch (error) {
       console.error('Error auto-generating memory file:', error);
@@ -514,10 +612,11 @@ function App() {
       );
 
       if (chunkIndex === -1) {
-        throw new Error('Could not find chunk for segment');
+        throw new Error('Could not find chunk for task');
       }
 
       const targetChunk = chunks[chunkIndex];
+      setProcessingChunkId(targetChunk.id);
 
       const response = await fetch('/api/process-individual-segment', {
         method: 'POST',
@@ -558,6 +657,7 @@ function App() {
           startIndex: highlightStart,
           endIndex: highlightEnd
         });
+        setLastProcessedChunkId(targetChunk.id);
 
         // Clear textarea selection
         setTimeout(() => {
@@ -577,14 +677,15 @@ function App() {
         setSegments(parseData.segments || []);
       }
     } catch (error: any) {
-      console.error('Error processing segment:', error);
-      alert('Error processing segment: ' + (error.message || error));
+      console.error('Error processing task:', error);
+      alert('Error processing task: ' + (error.message || error));
     } finally {
       setProcessingSegments(prev => {
         const newSet = new Set(prev);
         newSet.delete(segmentIndex);
         return newSet;
       });
+      setProcessingChunkId(null);
     }
   };
 
@@ -592,203 +693,242 @@ function App() {
     <div className="min-h-screen bg-gray-50 flex">
       {/* Sidebar */}
       <aside
-        className={`bg-white shadow-lg transition-all duration-300 ${
-          sidebarCollapsed ? 'w-0' : 'w-64'
-        } overflow-hidden`}
+        className={`fixed top-0 left-0 h-screen bg-white shadow-lg transition-all duration-300 flex flex-col z-20 ${
+          sidebarCollapsed ? 'w-0 overflow-hidden' : 'w-64 overflow-y-auto'
+        }`}
       >
-        <div className="p-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Memory Files</h2>
-          <p className="text-xs text-gray-500 mt-1">
-            {selectedMemoryFiles.size} of {memoryFiles.length} selected
-          </p>
-          <div className="mt-3 space-y-2">
-            <button
-              onClick={() => setShowNewFileDialog(true)}
-              className="w-full px-3 py-1.5 bg-blue-500 text-white text-xs rounded hover:bg-blue-600"
-            >
-              + New File
-            </button>
-            <button
-              onClick={() => setShowAutoGenDialog(true)}
-              className="w-full px-3 py-1.5 bg-purple-500 text-white text-xs rounded hover:bg-purple-600"
-            >
-              ✨ Auto-Generate
-            </button>
-          </div>
-        </div>
-        <div className="p-2 space-y-1 max-h-[calc(50vh-150px)] overflow-y-auto">
-          {memoryFiles.map((file) => (
-            <div
-              key={file.filename}
-              className={`flex items-center space-x-2 p-2 rounded ${
-                selectedMemoryFile === file.filename ? 'bg-blue-50' : ''
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={selectedMemoryFiles.has(file.filename)}
-                onChange={() => toggleMemoryFile(file.filename)}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-              />
-              <p
-                className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-blue-600"
-                onClick={() => {
-                  selectMemoryFile(file.filename);
-                  setActiveTab('memory');
-                }}
-              >
-                {file.filename}
+        {/* Memory Section */}
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion('memory')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'memory' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">Memory</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {selectedMemoryFiles.size} of {memoryFiles.length} selected
               </p>
             </div>
-          ))}
-          {memoryFiles.length === 0 && (
-            <p className="text-sm text-gray-500 text-center py-4">
-              No memory files found
-            </p>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'memory' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'memory' && (
+            <div className="px-4 pb-4">
+              <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+                {memoryFiles.map((file) => (
+                  <div
+                    key={file.filename}
+                    className={`flex items-center space-x-2 p-2 rounded ${
+                      selectedMemoryFile === file.filename ? 'bg-blue-50' : ''
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedMemoryFiles.has(file.filename)}
+                      onChange={() => toggleMemoryFile(file.filename)}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <p
+                      className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-blue-600"
+                      onClick={() => {
+                        selectMemoryFile(file.filename);
+                        setActiveTab('memory');
+                      }}
+                    >
+                      {file.filename}
+                    </p>
+                  </div>
+                ))}
+                {memoryFiles.length === 0 && (
+                  <p className="text-sm text-gray-500 text-center py-4">
+                    No memory files found
+                  </p>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
         {/* Chunks Section */}
-        <div className="p-4 border-t border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Chunks</h2>
-          <p className="text-xs text-gray-500 mt-1">
-            {selectedChunks.size} of {chunks.length} selected
-          </p>
-        </div>
-        <div className="p-2 space-y-1 max-h-[calc(20vh-100px)] overflow-y-auto">
-          {chunks.map((chunk, index) => (
-            <div
-              key={chunk.id}
-              draggable
-              onDragStart={() => setDraggingChunkIndex(index)}
-              onDragOver={(e) => {
-                e.preventDefault();
-                if (draggingChunkIndex !== null && draggingChunkIndex !== index) {
-                  const newChunks = [...chunks];
-                  const [removed] = newChunks.splice(draggingChunkIndex, 1);
-                  newChunks.splice(index, 0, removed);
-                  setChunks(newChunks);
-                  setDraggingChunkIndex(index);
-                }
-              }}
-              onDragEnd={() => {
-                setDraggingChunkIndex(null);
-                // Recompose content after drag ends
-                const composedContent = chunks.map(chunk => chunk.content).join('');
-                setContent(composedContent);
-              }}
-              className={`flex items-center space-x-2 p-2 rounded cursor-move ${
-                draggingChunkIndex === index ? 'opacity-50 bg-blue-100' : 'hover:bg-gray-50'
-              }`}
-            >
-              <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
-              </svg>
-              <input
-                type="checkbox"
-                checked={selectedChunks.has(chunk.id)}
-                onChange={() => {
-                  setSelectedChunks(prev => {
-                    const newSet = new Set(prev);
-                    if (newSet.has(chunk.id)) {
-                      newSet.delete(chunk.id);
-                    } else {
-                      newSet.add(chunk.id);
-                    }
-                    return newSet;
-                  });
-                }}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded flex-shrink-0"
-              />
-              <p className="text-sm font-medium text-gray-900 truncate flex-1" title={chunk.title}>
-                {chunk.title}
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion('chunks')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'chunks' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">Chunks</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {selectedChunks.size} of {chunks.length} selected
               </p>
             </div>
-          ))}
-          {chunks.length === 0 && (
-            <p className="text-sm text-gray-500 text-center py-4">
-              No chunks found
-            </p>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'chunks' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'chunks' && (
+            <div className="px-2 pb-4 space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+              {chunks.map((chunk) => (
+                <div
+                  key={chunk.id}
+                  className="flex items-center space-x-2 p-2 rounded hover:bg-gray-50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedChunks.has(chunk.id)}
+                    onChange={() => {
+                      setSelectedChunks(prev => {
+                        const newSet = new Set(prev);
+                        if (newSet.has(chunk.id)) {
+                          newSet.delete(chunk.id);
+                        } else {
+                          newSet.add(chunk.id);
+                        }
+                        return newSet;
+                      });
+                    }}
+                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded shrink-0"
+                  />
+                  <p className="text-sm font-medium text-gray-900 truncate flex-1" title={chunk.title}>
+                    {chunk.title}
+                  </p>
+                </div>
+              ))}
+              {chunks.length === 0 && (
+                <p className="text-sm text-gray-500 text-center py-4">
+                  No chunks found
+                </p>
+              )}
+            </div>
           )}
         </div>
 
-        {/* Segments Section */}
-        <div className="p-4 border-t border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Segments</h2>
-          <p className="text-xs text-gray-500 mt-1">
-            {segments.filter(s => s.processed).length} of {segments.length} processed
-          </p>
-        </div>
-        <div className="p-2 space-y-1 max-h-[calc(25vh-100px)] overflow-y-auto">
-          {segments.map((segment, index) => (
-            <div
-              key={index}
-              className="flex items-center justify-between p-2 rounded bg-gray-50 hover:bg-gray-100"
-            >
-              <div className="flex-1 min-w-0 mr-2">
-                <p className="text-xs font-medium text-gray-700 truncate">
-                  Segment {index + 1}
-                </p>
-                <p className="text-xs text-gray-500 truncate" title={segment.prompt}>
-                  {segment.prompt.substring(0, 50)}{segment.prompt.length > 50 ? '...' : ''}
-                </p>
-              </div>
-              <button
-                onClick={() => processIndividualSegment(index)}
-                disabled={processingSegments.has(index)}
-                className={`px-2 py-1 text-xs rounded whitespace-nowrap ${
-                  segment.processed
-                    ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                    : 'bg-blue-500 text-white hover:bg-blue-600'
-                } disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                {processingSegments.has(index) ? '...' : segment.processed ? '✓ Done' : 'Process'}
-              </button>
+        {/* Tasks Section */}
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion('segments')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'segments' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">Tasks</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {segments.filter(s => s.processed).length} of {segments.length} processed
+              </p>
             </div>
-          ))}
-          {segments.length === 0 && (
-            <p className="text-sm text-gray-500 text-center py-4">
-              No segments found
-            </p>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'segments' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'segments' && (
+            <div className="px-2 pb-4 space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+              {segments.map((segment, index) => (
+                <div
+                  key={index}
+                  className="flex items-center justify-between p-2 rounded bg-gray-50 hover:bg-gray-100"
+                >
+                  <div className="flex-1 min-w-0 mr-2">
+                    <p className="text-xs font-medium text-gray-700 truncate">
+                      Task {index + 1}
+                    </p>
+                    <p className="text-xs text-gray-500 truncate" title={segment.prompt}>
+                      {segment.prompt.substring(0, 50)}{segment.prompt.length > 50 ? '...' : ''}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => processIndividualSegment(index)}
+                    disabled={processingSegments.has(index)}
+                    className={`px-2 py-1 text-xs rounded whitespace-nowrap ${
+                      segment.processed
+                        ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                        : 'bg-blue-500 text-white hover:bg-blue-600'
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {processingSegments.has(index) ? '...' : segment.processed ? 'Done' : 'Process'}
+                  </button>
+                </div>
+              ))}
+              {segments.length === 0 && (
+                <p className="text-sm text-gray-500 text-center py-4">
+                  No tasks found
+                </p>
+              )}
+            </div>
           )}
         </div>
 
         {/* Images Section */}
-        <div className="p-4 border-t border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Images</h2>
-          <input
-            type="text"
-            placeholder="Search images..."
-            value={imageSearch}
-            onChange={(e) => setImageSearch(e.target.value)}
-            className="w-full mt-2 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-        </div>
-        <div className="p-2 space-y-1 max-h-[calc(25vh-100px)] overflow-y-auto">
-          {images
-            .filter(img => img.toLowerCase().includes(imageSearch.toLowerCase()))
-            .map((image) => (
-            <div
-              key={image}
-              className="flex items-center justify-between p-2 rounded bg-gray-50 hover:bg-gray-100"
-            >
-              <div className="flex-1 min-w-0 mr-2">
-                <p className="text-xs font-medium text-gray-700 truncate" title={image}>
-                  {image}
-                </p>
-              </div>
-              <button
-                onClick={() => insertImageIntoEditor(image)}
-                className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 whitespace-nowrap"
-              >
-                Insert
-              </button>
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion('images')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'images' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">Images</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {images.length} images
+              </p>
             </div>
-          ))}
-          {images.filter(img => img.toLowerCase().includes(imageSearch.toLowerCase())).length === 0 && (
-            <p className="text-sm text-gray-500 text-center py-4">
-              No images found
-            </p>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'images' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'images' && (
+            <div className="px-4 pb-4">
+              <input
+                type="text"
+                placeholder="Search images..."
+                value={imageSearch}
+                onChange={(e) => setImageSearch(e.target.value)}
+                className="w-full mb-2 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+                {images
+                  .filter(img => img.toLowerCase().includes(imageSearch.toLowerCase()))
+                  .map((image) => (
+                  <div
+                    key={image}
+                    className="flex items-center justify-between p-2 rounded bg-gray-50 hover:bg-gray-100"
+                  >
+                    <div className="flex-1 min-w-0 mr-2">
+                      <p className="text-xs font-medium text-gray-700 truncate" title={image}>
+                        {image}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => insertImageIntoEditor(image)}
+                      className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 whitespace-nowrap"
+                    >
+                      Insert
+                    </button>
+                  </div>
+                ))}
+                {images.filter(img => img.toLowerCase().includes(imageSearch.toLowerCase())).length === 0 && (
+                  <p className="text-sm text-gray-500 text-center py-4">
+                    No images found
+                  </p>
+                )}
+              </div>
+            </div>
           )}
         </div>
       </aside>
@@ -817,7 +957,7 @@ function App() {
       </button>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col">
+      <div className={`flex-1 flex flex-col transition-all duration-300 ${sidebarCollapsed ? 'ml-0' : 'ml-64'}`}>
         {/* Header */}
         <header className="bg-white shadow">
           <div className="px-4 py-4">
@@ -839,7 +979,7 @@ function App() {
                   disabled={processing || segments.length === 0}
                   className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 disabled:opacity-50"
                 >
-                  {processing ? 'Processing...' : `Process All (${segments.length})`}
+                  {processing ? 'Processing...' : `Process All Tasks (${segments.length})`}
                 </button>
               </div>
             </div>
@@ -867,7 +1007,7 @@ function App() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
             >
-              Memory Files
+              Memory
             </button>
             <button
               onClick={() => setActiveTab('images')}
@@ -886,27 +1026,121 @@ function App() {
         <div className="px-4 py-6 flex-1 overflow-hidden">
           {activeTab === 'editor' && (
             <div className="grid grid-cols-2 gap-4 h-full">
-              {/* Left: Editor */}
+              {/* Left: Editor with Draggable Chunks */}
               <div className="bg-white shadow rounded-lg flex flex-col">
-                <div className="px-4 py-3 border-b border-gray-200">
+                <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
                   <h2 className="text-lg font-medium">Markdown Editor</h2>
+                  <span className="text-xs text-gray-500">{chunks.length} chunks</span>
                 </div>
-                <div className="p-4 flex-1">
-                  <textarea
-                    value={content}
-                    onChange={(e) => {
-                      setContent(e.target.value);
-                      setLastProcessedSegment(null);
-                    }}
-                    className="editor-textarea w-full h-full font-mono text-sm border border-gray-300 rounded p-4 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-                    placeholder="Start writing markdown with <agent> segments..."
-                    style={{
-                      '::selection': {
-                        backgroundColor: '#fecaca',
-                        color: 'inherit'
-                      }
-                    } as any}
-                  />
+                <div className="p-4 flex-1 overflow-y-auto space-y-2">
+                  {chunks.length === 0 ? (
+                    <textarea
+                      value={content}
+                      onChange={(e) => {
+                        setContent(e.target.value);
+                        setLastProcessedSegment(null);
+                      }}
+                      className="editor-textarea w-full h-full font-mono text-sm border border-gray-300 rounded p-4 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                      placeholder="Start writing markdown with <agent> tasks..."
+                    />
+                  ) : (
+                    chunks.map((chunk, index) => (
+                      <div
+                        key={chunk.id}
+                        draggable={editingChunkId !== chunk.id}
+                        onDragStart={() => handleChunkDragStart(index)}
+                        onDragOver={(e) => handleChunkDragOver(e, index)}
+                        onDrop={() => handleChunkDrop(index)}
+                        onDragEnd={handleChunkDragEnd}
+                        className={`border rounded-lg transition-all ${
+                          processingChunkId === chunk.id
+                            ? 'border-yellow-400 border-2 bg-yellow-50'
+                            : lastProcessedChunkId === chunk.id
+                            ? 'border-green-400 border-2 bg-green-50'
+                            : draggingChunkIndex === index
+                            ? 'opacity-50 border-blue-400 bg-blue-50'
+                            : dragOverChunkIndex === index
+                            ? 'border-blue-400 border-2'
+                            : 'border-gray-200 hover:border-gray-300'
+                        }`}
+                      >
+                        <div className={`flex items-center gap-2 px-3 py-2 border-b rounded-t-lg ${
+                          processingChunkId === chunk.id
+                            ? 'bg-yellow-100 border-yellow-200'
+                            : lastProcessedChunkId === chunk.id
+                            ? 'bg-green-100 border-green-200'
+                            : 'bg-gray-50 border-gray-200'
+                        }`}>
+                          <svg className="w-4 h-4 text-gray-400 shrink-0 cursor-move" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
+                          </svg>
+                          <span className="text-sm font-medium text-gray-700 truncate flex-1" title={chunk.title}>
+                            {chunk.title}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); moveChunkUp(index); }}
+                              disabled={index === 0}
+                              className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed"
+                              title="Move up"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); moveChunkDown(index); }}
+                              disabled={index === chunks.length - 1}
+                              className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 disabled:cursor-not-allowed"
+                              title="Move down"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </button>
+                            <span className="text-xs text-gray-400 ml-1">#{index + 1}</span>
+                          </div>
+                        </div>
+                        {editingChunkId === chunk.id ? (
+                          <textarea
+                            value={chunk.content}
+                            onChange={(e) => {
+                              updateChunkContent(chunk.id, e.target.value);
+                              e.target.style.height = 'auto';
+                              e.target.style.height = e.target.scrollHeight + 'px';
+                            }}
+                            onBlur={() => setEditingChunkId(null)}
+                            onFocus={(e) => {
+                              e.target.style.height = 'auto';
+                              e.target.style.height = e.target.scrollHeight + 'px';
+                            }}
+                            className="w-full font-mono text-sm p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-inset resize-none rounded-b-lg"
+                            style={{ minHeight: '150px' }}
+                            autoFocus
+                          />
+                        ) : (
+                          <div
+                            onClick={() => {
+                              setEditingChunkId(chunk.id);
+                              setLastProcessedChunkId(null);
+                            }}
+                            className={`p-3 font-mono text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded-b-lg whitespace-pre-wrap ${
+                              processingChunkId === chunk.id
+                                ? 'bg-yellow-50'
+                                : lastProcessedChunkId === chunk.id
+                                ? 'bg-green-50'
+                                : ''
+                            }`}
+                            style={{ minHeight: '60px' }}
+                          >
+                            {chunk.content.length > 300
+                              ? chunk.content.substring(0, 300) + '...'
+                              : chunk.content || <span className="text-gray-400 italic">Empty chunk - click to edit</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -962,19 +1196,48 @@ function App() {
                     </h2>
                   )}
                 </div>
-                {selectedMemoryFile && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={saveMemoryFile}
-                    disabled={!memoryHasChanges}
+                    onClick={() => setShowNewFileDialog(true)}
+                    className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                  >
+                    + New File
+                  </button>
+                  <button
+                    onClick={() => setShowAutoGenDialog(true)}
+                    disabled={!selectedMemoryFile}
                     className={`px-3 py-1 text-white text-sm rounded ${
-                      memoryHasChanges
-                        ? 'bg-blue-500 hover:bg-blue-600'
+                      selectedMemoryFile
+                        ? 'bg-purple-500 hover:bg-purple-600'
                         : 'bg-gray-400 cursor-not-allowed'
                     }`}
+                    title={selectedMemoryFile ? 'Auto-generate content for this file' : 'Select a file first'}
                   >
-                    {memoryHasChanges ? 'Save Changes' : 'Saved ✓'}
+                    Auto-Generate
                   </button>
-                )}
+                  {selectedMemoryFile && (
+                    <>
+                      <button
+                        onClick={saveMemoryFile}
+                        disabled={!memoryHasChanges}
+                        className={`px-3 py-1 text-white text-sm rounded ${
+                          memoryHasChanges
+                            ? 'bg-green-500 hover:bg-green-600'
+                            : 'bg-gray-400 cursor-not-allowed'
+                        }`}
+                      >
+                        {memoryHasChanges ? 'Save Changes' : 'Saved'}
+                      </button>
+                      <button
+                        onClick={deleteMemoryFile}
+                        className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600"
+                        title="Delete this file"
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
               <div className="p-4 flex-1">
                 {selectedMemoryFile ? (
@@ -1096,11 +1359,14 @@ function App() {
       {showAutoGenDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 w-96">
-            <h3 className="text-lg font-semibold mb-4">Auto-Generate Memory File</h3>
+            <h3 className="text-lg font-semibold mb-2">Auto-Generate Content</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              This will replace the content of <span className="font-medium">{selectedMemoryFile}</span>
+            </p>
             <textarea
               value={autoGenDescription}
               onChange={(e) => setAutoGenDescription(e.target.value)}
-              placeholder="Describe what kind of memory file you want to create..."
+              placeholder="Describe what content you want to generate..."
               className="w-full px-3 py-2 border border-gray-300 rounded mb-4 h-24 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
               autoFocus
             />
