@@ -50,14 +50,6 @@ interface HistorySnapshot {
   chunks: Page[];
 }
 
-interface TextSelection {
-  text: string;
-  chunkId: string;
-  startOffset: number;
-  endOffset: number;
-  rect: { top: number; left: number; width: number };
-}
-
 function App() {
   const [content, setContent] = useState(() => {
     const saved = localStorage.getItem('copywriter-content');
@@ -112,8 +104,6 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
-  const [textSelection, setTextSelection] = useState<TextSelection | null>(null);
-  const [selectionProcessing, setSelectionProcessing] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
 
@@ -564,102 +554,6 @@ function App() {
 
     // Use segment's chunkId directly
     scrollToChunkInEditor(segment.chunkId);
-  };
-
-  const handleTextSelection = (chunkId: string) => {
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-      setTextSelection(null);
-      return;
-    }
-
-    const text = selection.toString().trim();
-    if (text.length < 2) {
-      setTextSelection(null);
-      return;
-    }
-
-    const range = selection.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-
-    // Get the chunk content element to calculate offsets
-    const chunk = chunks.find(c => c.id === chunkId);
-    if (!chunk) return;
-
-    // Find start/end offsets within the chunk content
-    const chunkContent = chunk.content;
-    const startOffset = chunkContent.indexOf(text);
-    const endOffset = startOffset + text.length;
-
-    if (startOffset === -1) {
-      setTextSelection(null);
-      return;
-    }
-
-    setTextSelection({
-      text,
-      chunkId,
-      startOffset,
-      endOffset,
-      rect: {
-        top: rect.top + window.scrollY,
-        left: rect.left + window.scrollX,
-        width: rect.width
-      }
-    });
-  };
-
-  const clearTextSelection = () => {
-    setTextSelection(null);
-  };
-
-  const processSelectedText = async (action: 'rewrite' | 'expand' | 'summarize') => {
-    if (!textSelection) return;
-
-    const chunk = chunks.find(c => c.id === textSelection.chunkId);
-    if (!chunk) return;
-
-    setSelectionProcessing(true);
-
-    const prompts = {
-      rewrite: `Rewrite the following text to be clearer and more engaging while keeping the same meaning and length. Return ONLY the rewritten text, nothing else:\n\n${textSelection.text}`,
-      expand: `Expand the following text with more detail and explanation. Return ONLY the expanded text, nothing else:\n\n${textSelection.text}`,
-      summarize: `Summarize the following text to be more concise while keeping the key points. Return ONLY the summarized text, nothing else:\n\n${textSelection.text}`
-    };
-
-    try {
-      const response = await fetch('/api/process-segment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: prompts[action],
-          context: chunk.content,
-          memoryDir
-        })
-      });
-
-      const data = await response.json();
-
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      if (data.generatedContent) {
-        // Replace the selected text in the chunk content
-        const newContent =
-          chunk.content.substring(0, textSelection.startOffset) +
-          data.generatedContent +
-          chunk.content.substring(textSelection.endOffset);
-
-        updateChunkContent(chunk.id, newContent);
-        setTextSelection(null);
-      }
-    } catch (error: any) {
-      console.error('Error processing text:', error);
-      alert('Error processing text: ' + (error.message || error));
-    } finally {
-      setSelectionProcessing(false);
-    }
   };
 
   const renderPreview = () => {
@@ -1560,13 +1454,11 @@ function App() {
                           />
                         ) : (
                           <div
-                            onDoubleClick={() => {
+                            onClick={() => {
                               setEditingChunkId(chunk.id);
                               setLastProcessedChunkIds(new Set());
-                              setTextSelection(null);
                             }}
-                            onMouseUp={() => handleTextSelection(chunk.id)}
-                            className={`p-3 font-mono text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded-b-lg whitespace-pre-wrap select-text ${
+                            className={`p-3 font-mono text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded-b-lg whitespace-pre-wrap ${
                               processingChunkIds.has(chunk.id)
                                 ? 'bg-yellow-50'
                                 : lastProcessedChunkIds.has(chunk.id)
@@ -2009,6 +1901,7 @@ More content...`}
           </div>
         </div>
       )}
+
     </div>
   );
 }
