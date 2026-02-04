@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { marked } from 'marked';
 
 interface Segment {
@@ -76,15 +76,30 @@ function App() {
   const [dragOverChunkIndex, setDragOverChunkIndex] = useState<number | null>(null);
   const [lastProcessedChunkId, setLastProcessedChunkId] = useState<string | null>(null);
   const [processingChunkId, setProcessingChunkId] = useState<string | null>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadMemoryFiles();
     loadImages();
   }, [memoryDir]);
 
+  // Scroll preview to active chunk
   useEffect(() => {
-    parseContent();
-  }, [content]);
+    const activeChunkId = editingChunkId || processingChunkId || lastProcessedChunkId;
+    if (activeChunkId && previewRef.current) {
+      const element = previewRef.current.querySelector(`[data-chunk-id="${activeChunkId}"]`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  }, [editingChunkId, processingChunkId, lastProcessedChunkId]);
+
+  useEffect(() => {
+    // Don't re-parse while editing a chunk - it will replace chunks and cause cursor issues
+    if (!editingChunkId) {
+      parseContent();
+    }
+  }, [content, editingChunkId]);
 
   // Persist state to localStorage
   useEffect(() => {
@@ -690,7 +705,7 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
+    <div className="h-screen bg-gray-50 flex overflow-hidden">
       {/* Sidebar */}
       <aside
         className={`fixed top-0 left-0 h-screen bg-white shadow-lg transition-all duration-300 flex flex-col z-20 ${
@@ -957,9 +972,9 @@ function App() {
       </button>
 
       {/* Main Content */}
-      <div className={`flex-1 flex flex-col transition-all duration-300 ${sidebarCollapsed ? 'ml-0' : 'ml-64'}`}>
+      <div className={`flex-1 flex flex-col overflow-hidden transition-all duration-300 ${sidebarCollapsed ? 'ml-0' : 'ml-64'}`}>
         {/* Header */}
-        <header className="bg-white shadow">
+        <header className="bg-white shadow shrink-0">
           <div className="px-4 py-4">
             <div className="flex justify-between items-center">
               <h1 className="text-2xl font-bold text-gray-900">Copy Writer</h1>
@@ -987,7 +1002,7 @@ function App() {
         </header>
 
         {/* Tabs */}
-        <div className="px-4 pt-4 border-b border-gray-200">
+        <div className="px-4 pt-4 border-b border-gray-200 shrink-0">
           <nav className="-mb-px flex space-x-8">
             <button
               onClick={() => setActiveTab('editor')}
@@ -1023,16 +1038,16 @@ function App() {
         </div>
 
         {/* Content */}
-        <div className="px-4 py-6 flex-1 overflow-hidden">
+        <div className="px-4 py-6 flex-1 overflow-hidden min-h-0">
           {activeTab === 'editor' && (
             <div className="grid grid-cols-2 gap-4 h-full">
               {/* Left: Editor with Draggable Chunks */}
-              <div className="bg-white shadow rounded-lg flex flex-col">
-                <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+              <div className="bg-white shadow rounded-lg flex flex-col min-h-0 overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center shrink-0">
                   <h2 className="text-lg font-medium">Markdown Editor</h2>
                   <span className="text-xs text-gray-500">{chunks.length} chunks</span>
                 </div>
-                <div className="p-4 flex-1 overflow-y-auto space-y-2">
+                <div className="p-4 flex-1 overflow-y-auto space-y-2 min-h-0">
                   {chunks.length === 0 ? (
                     <textarea
                       value={content}
@@ -1145,14 +1160,39 @@ function App() {
               </div>
 
               {/* Right: Preview */}
-              <div className="bg-white shadow rounded-lg flex flex-col">
-                <div className="px-4 py-3 border-b border-gray-200">
+              <div className="bg-white shadow rounded-lg flex flex-col min-h-0 overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-200 shrink-0">
                   <h2 className="text-lg font-medium">Preview</h2>
                 </div>
                 <div
-                  className="p-6 markdown-preview flex-1 overflow-y-auto"
-                  dangerouslySetInnerHTML={renderPreview()}
-                />
+                  ref={previewRef}
+                  className="p-6 markdown-preview flex-1 overflow-y-auto min-h-0"
+                >
+                  {chunks.length === 0 ? (
+                    <div dangerouslySetInnerHTML={{ __html: marked.parse(content || '') as string }} />
+                  ) : (
+                    chunks.map((chunk, index) => (
+                      <div key={chunk.id}>
+                        <div
+                          data-chunk-id={chunk.id}
+                          className={`transition-all duration-300 ${
+                            editingChunkId === chunk.id
+                              ? 'bg-blue-50 -mx-4 px-4 py-2 border-l-4 border-blue-400'
+                              : processingChunkId === chunk.id
+                              ? 'bg-yellow-50 -mx-4 px-4 py-2 border-l-4 border-yellow-400'
+                              : lastProcessedChunkId === chunk.id
+                              ? 'bg-green-50 -mx-4 px-4 py-2 border-l-4 border-green-400'
+                              : ''
+                          }`}
+                          dangerouslySetInnerHTML={{ __html: marked.parse(chunk.content || '') as string }}
+                        />
+                        {index < chunks.length - 1 && (
+                          <hr className="my-4 border-gray-200" />
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           )}
