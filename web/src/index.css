@@ -42,9 +42,17 @@
 .markdown-preview ul, .markdown-preview ol {
   margin-bottom: 1rem;
   padding-left: 2rem;
+  list-style-position: outside;
+}
+.markdown-preview ul {
+  list-style-type: disc;
+}
+.markdown-preview ol {
+  list-style-type: decimal;
 }
 .markdown-preview li {
   margin-bottom: 0.5rem;
+  display: list-item;
 }
 .markdown-preview code {
   background-color: #f3f4f6;
