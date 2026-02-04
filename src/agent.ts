@@ -32,7 +32,7 @@ export async function generateWithClaude(options: AgentOptions): Promise<string>
   fullPrompt += prompt;
   fullPrompt += '\n\n---\n\n';
   fullPrompt += '# Important Instructions\n\n';
-  fullPrompt += 'Return ONLY the generated content as plain text. Do NOT use any tools, do NOT write to files, do NOT execute commands. Just output the text content directly.';
+  fullPrompt += 'Return ONLY the generated content as plain text. Do NOT write to files, do NOT execute commands. You MAY use web search if needed to gather information. Just output the text content directly.';
 
   const tmpDir = os.tmpdir();
   const tmpFile = path.join(tmpDir, `claude-prompt-${Date.now()}.txt`);
