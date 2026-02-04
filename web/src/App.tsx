@@ -24,6 +24,14 @@ interface Chunk {
   endLine: number;
 }
 
+interface HistorySnapshot {
+  id: string;
+  timestamp: number;
+  label: string;
+  content: string;
+  chunks: Chunk[];
+}
+
 function App() {
   const [content, setContent] = useState(() => {
     const saved = localStorage.getItem('copywriter-content');
@@ -71,11 +79,16 @@ function App() {
     return saved ? new Set(JSON.parse(saved)) : new Set();
   });
   const [draggingChunkIndex, setDraggingChunkIndex] = useState<number | null>(null);
-  const [openAccordion, setOpenAccordion] = useState<'memory' | 'chunks' | 'segments' | 'images'>('memory');
+  const [openAccordion, setOpenAccordion] = useState<'memory' | 'chunks' | 'segments' | 'images' | 'history'>('memory');
   const [editingChunkId, setEditingChunkId] = useState<string | null>(null);
   const [dragOverChunkIndex, setDragOverChunkIndex] = useState<number | null>(null);
   const [lastProcessedChunkId, setLastProcessedChunkId] = useState<string | null>(null);
   const [processingChunkId, setProcessingChunkId] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistorySnapshot[]>(() => {
+    const saved = localStorage.getItem('copywriter-history');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -129,6 +142,40 @@ function App() {
   useEffect(() => {
     localStorage.setItem('copywriter-selectedChunks', JSON.stringify(Array.from(selectedChunks)));
   }, [selectedChunks]);
+
+  useEffect(() => {
+    // Limit history to last 50 entries to avoid storage issues
+    const limitedHistory = history.slice(-50);
+    localStorage.setItem('copywriter-history', JSON.stringify(limitedHistory));
+  }, [history]);
+
+  const saveSnapshot = (label: string) => {
+    const snapshot: HistorySnapshot = {
+      id: `snapshot-${Date.now()}`,
+      timestamp: Date.now(),
+      label,
+      content,
+      chunks: [...chunks]
+    };
+    setHistory(prev => [...prev, snapshot]);
+  };
+
+  const revertToSnapshot = (snapshotId: string) => {
+    const snapshot = history.find(s => s.id === snapshotId);
+    if (snapshot) {
+      // Save current state before reverting
+      saveSnapshot('Before revert');
+      setContent(snapshot.content);
+      setChunks(snapshot.chunks);
+      setShowHistoryPanel(false);
+    }
+  };
+
+  const clearHistory = () => {
+    if (confirm('Clear all history? This cannot be undone.')) {
+      setHistory([]);
+    }
+  };
 
   const loadMemoryFiles = async () => {
     try {
@@ -238,6 +285,9 @@ function App() {
   };
 
   const processAllSegments = async () => {
+    // Save snapshot before processing all
+    saveSnapshot('Before processing all tasks');
+
     setProcessing(true);
     const originalContent = content;
     try {
@@ -591,6 +641,9 @@ function App() {
   const processIndividualSegment = async (segmentIndex: number) => {
     const segment = segments[segmentIndex];
 
+    // Save snapshot before processing
+    saveSnapshot(`Before processing Task ${segmentIndex + 1}`);
+
     // Mark as processing
     setProcessingSegments(prev => new Set([...prev, segmentIndex]));
 
@@ -941,6 +994,72 @@ function App() {
                   <p className="text-sm text-gray-500 text-center py-4">
                     No images found
                   </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* History Section */}
+        <div className="border-b border-gray-200">
+          <button
+            onClick={() => setOpenAccordion(openAccordion === 'history' ? null : 'history')}
+            className={`w-full p-4 flex items-center justify-between hover:bg-gray-50 ${openAccordion === 'history' ? 'bg-gray-50' : ''}`}
+          >
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 text-left">History</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {history.length} snapshots
+              </p>
+            </div>
+            <svg
+              className={`w-5 h-5 text-gray-500 transition-transform ${openAccordion === 'history' ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {openAccordion === 'history' && (
+            <div className="px-4 pb-4">
+              {history.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="w-full mb-2 px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+                >
+                  Clear All History
+                </button>
+              )}
+              <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+                {history.length === 0 ? (
+                  <p className="text-sm text-gray-500 text-center py-4">
+                    No history yet
+                  </p>
+                ) : (
+                  [...history].reverse().map((snapshot) => (
+                    <div
+                      key={snapshot.id}
+                      className="p-2 rounded bg-gray-50 hover:bg-gray-100"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 min-w-0 mr-2">
+                          <p className="text-xs font-medium text-gray-700 truncate" title={snapshot.label}>
+                            {snapshot.label}
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            {new Date(snapshot.timestamp).toLocaleTimeString()}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => revertToSnapshot(snapshot.id)}
+                          className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 whitespace-nowrap"
+                        >
+                          Revert
+                        </button>
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
             </div>
