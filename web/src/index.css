@@ -122,3 +122,11 @@
   background-color: #fecaca;
   color: inherit;
 }
+
+/* Agent segment highlighting (purple) */
+.agent-highlight {
+  background-color: #f3e8ff;
+  color: #7c3aed;
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+}
