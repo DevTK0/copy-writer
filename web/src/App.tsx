@@ -99,6 +99,8 @@ function App() {
   const [focusedChunkId, setFocusedChunkId] = useState<string | null>(null);
   const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
   const [expandedChapters, setExpandedChapters] = useState<Set<string>>(new Set());
+  const [editingContentItem, setEditingContentItem] = useState<{ type: 'module' | 'chapter' | 'page'; id: string } | null>(null);
+  const [editingContentTitle, setEditingContentTitle] = useState('');
   const [history, setHistory] = useState<HistorySnapshot[]>(() => {
     const saved = localStorage.getItem('copywriter-history');
     return saved ? JSON.parse(saved) : [];
@@ -314,6 +316,189 @@ function App() {
       console.error('Error importing:', error);
       alert('Error importing: ' + (error.message || error));
     }
+  };
+
+  const renameContentItem = async (type: 'module' | 'chapter' | 'page', itemPath: string, newTitle: string) => {
+    try {
+      const response = await fetch('/api/content/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, itemPath, newTitle })
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+      setEditingContentItem(null);
+      setEditingContentTitle('');
+    } catch (error: any) {
+      console.error('Error renaming:', error);
+      alert('Error renaming: ' + (error.message || error));
+    }
+  };
+
+  const deleteContentItem = async (type: 'module' | 'chapter' | 'page', itemPath: string, title: string) => {
+    const typeLabel = type === 'module' ? 'module and all its chapters/pages' : type === 'chapter' ? 'chapter and all its pages' : 'page';
+    if (!confirm(`Delete "${title}"? This will permanently delete this ${typeLabel}.`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/content/${type}/${encodeURIComponent(itemPath)}`, {
+        method: 'DELETE'
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+    } catch (error: any) {
+      console.error('Error deleting:', error);
+      alert('Error deleting: ' + (error.message || error));
+    }
+  };
+
+  const reorderContentItems = async (type: 'module' | 'chapter' | 'page', parentPath: string, items: string[]) => {
+    try {
+      const response = await fetch('/api/content/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, parentPath, items })
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+    } catch (error: any) {
+      console.error('Error reordering:', error);
+      alert('Error reordering: ' + (error.message || error));
+    }
+  };
+
+  const createChapter = async (moduleId: string) => {
+    const title = prompt('Enter chapter title:');
+    if (!title) return;
+
+    try {
+      const response = await fetch('/api/content/chapter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moduleId, title })
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+      // Expand the module to show new chapter
+      setExpandedModules(prev => new Set([...prev, moduleId]));
+    } catch (error: any) {
+      console.error('Error creating chapter:', error);
+      alert('Error creating chapter: ' + (error.message || error));
+    }
+  };
+
+  const createPage = async (moduleId: string, chapterId: string) => {
+    const title = prompt('Enter page title:');
+    if (!title) return;
+
+    try {
+      const response = await fetch('/api/content/page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moduleId, chapterId, title, content: '' })
+      });
+
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      await loadChunksFromFiles();
+      // Expand the chapter to show new page
+      setExpandedChapters(prev => new Set([...prev, `${moduleId}/${chapterId}`]));
+    } catch (error: any) {
+      console.error('Error creating page:', error);
+      alert('Error creating page: ' + (error.message || error));
+    }
+  };
+
+  const createModule = async () => {
+    const moduleTitle = prompt('Enter module title:');
+    if (!moduleTitle) return;
+
+    const chapterTitle = prompt('Enter first chapter title:', 'Introduction');
+    if (!chapterTitle) return;
+
+    const pageTitle = prompt('Enter first page title:', 'Overview');
+    if (!pageTitle) return;
+
+    try {
+      // Create module
+      const moduleResponse = await fetch('/api/content/module', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: moduleTitle })
+      });
+      const moduleData = await moduleResponse.json();
+      if (moduleData.error) throw new Error(moduleData.error);
+
+      const moduleId = moduleData.id;
+
+      // Create first chapter
+      const chapterResponse = await fetch('/api/content/chapter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moduleId, title: chapterTitle })
+      });
+      const chapterData = await chapterResponse.json();
+      if (chapterData.error) throw new Error(chapterData.error);
+
+      const chapterId = chapterData.id.split('/')[1]; // Extract just the chapter folder name
+
+      // Create first page
+      const pageResponse = await fetch('/api/content/page', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moduleId, chapterId, title: pageTitle, content: '' })
+      });
+      const pageData = await pageResponse.json();
+      if (pageData.error) throw new Error(pageData.error);
+
+      await loadChunksFromFiles();
+      // Expand the new module and chapter
+      setExpandedModules(prev => new Set([...prev, moduleId]));
+      setExpandedChapters(prev => new Set([...prev, `${moduleId}/${chapterId}`]));
+    } catch (error: any) {
+      console.error('Error creating module:', error);
+      alert('Error creating module: ' + (error.message || error));
+    }
+  };
+
+  const moveContentItem = async (
+    type: 'module' | 'chapter' | 'page',
+    parentPath: string,
+    items: string[],
+    currentIndex: number,
+    direction: 'up' | 'down'
+  ) => {
+    const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (newIndex < 0 || newIndex >= items.length) return;
+
+    const newItems = [...items];
+    [newItems[currentIndex], newItems[newIndex]] = [newItems[newIndex], newItems[currentIndex]];
+
+    await reorderContentItems(type, parentPath, newItems);
   };
 
   const parseSegments = async () => {
@@ -1555,6 +1740,12 @@ function App() {
               <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
                 <h2 className="text-lg font-medium">Content Structure</h2>
                 <div className="flex gap-2">
+                  <button
+                    onClick={createModule}
+                    className="px-3 py-1.5 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+                  >
+                    + New Module
+                  </button>
                   <label className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 cursor-pointer text-sm">
                     Import
                     <input
@@ -1593,64 +1784,308 @@ More content...`}
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {modules.map((module) => (
+                    {modules.map((module, moduleIndex) => (
                       <div key={module.id} className="border border-gray-200 rounded-lg">
                         {/* Module Header */}
-                        <button
-                          onClick={() => setExpandedModules(prev => {
-                            const next = new Set(prev);
-                            if (next.has(module.id)) next.delete(module.id);
-                            else next.add(module.id);
-                            return next;
-                          })}
-                          className="w-full flex items-center gap-2 p-3 bg-blue-50 hover:bg-blue-100 rounded-t-lg"
-                        >
-                          <svg className={`w-4 h-4 transition-transform ${expandedModules.has(module.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                          </svg>
-                          <span className="font-semibold text-blue-900">{module.title}</span>
-                          <span className="text-xs text-blue-600 ml-auto">{module.chapters.length} chapters</span>
-                        </button>
+                        <div className="flex items-center gap-2 p-3 bg-blue-50 hover:bg-blue-100 rounded-t-lg">
+                          <button
+                            onClick={() => setExpandedModules(prev => {
+                              const next = new Set(prev);
+                              if (next.has(module.id)) next.delete(module.id);
+                              else next.add(module.id);
+                              return next;
+                            })}
+                            className="flex items-center gap-2 flex-1 min-w-0"
+                          >
+                            <svg className={`w-4 h-4 transition-transform shrink-0 ${expandedModules.has(module.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                            {editingContentItem?.type === 'module' && editingContentItem?.id === module.id ? (
+                              <input
+                                type="text"
+                                value={editingContentTitle}
+                                onChange={(e) => setEditingContentTitle(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    renameContentItem('module', module.id, editingContentTitle);
+                                  } else if (e.key === 'Escape') {
+                                    setEditingContentItem(null);
+                                  }
+                                }}
+                                onBlur={() => renameContentItem('module', module.id, editingContentTitle)}
+                                className="font-semibold text-blue-900 bg-white border border-blue-300 rounded px-2 py-0.5 flex-1 min-w-0"
+                                autoFocus
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            ) : (
+                              <span className="font-semibold text-blue-900 truncate">{module.title}</span>
+                            )}
+                          </button>
+                          <span className="text-xs text-blue-600 shrink-0">{module.chapters.length} chapters</span>
+                          {/* Module actions */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); createChapter(module.id); }}
+                              disabled={editingContentItem !== null}
+                              className={`p-1 rounded ${editingContentItem !== null ? 'text-gray-300' : 'text-blue-600 hover:bg-blue-200'}`}
+                              title="Add chapter"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingContentItem({ type: 'module', id: module.id });
+                                setEditingContentTitle(module.title);
+                              }}
+                              className="p-1 text-blue-600 hover:bg-blue-200 rounded"
+                              title="Rename"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                moveContentItem('module', '', modules.map(m => m.id), moduleIndex, 'up');
+                              }}
+                              disabled={moduleIndex === 0}
+                              className={`p-1 rounded ${moduleIndex === 0 ? 'text-gray-300' : 'text-blue-600 hover:bg-blue-200'}`}
+                              title="Move up"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                moveContentItem('module', '', modules.map(m => m.id), moduleIndex, 'down');
+                              }}
+                              disabled={moduleIndex === modules.length - 1}
+                              className={`p-1 rounded ${moduleIndex === modules.length - 1 ? 'text-gray-300' : 'text-blue-600 hover:bg-blue-200'}`}
+                              title="Move down"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteContentItem('module', module.id, module.title);
+                              }}
+                              disabled={editingContentItem !== null}
+                              className={`p-1 rounded ${editingContentItem !== null ? 'text-gray-300' : 'text-red-500 hover:bg-red-100'}`}
+                              title="Delete module"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
 
                         {/* Chapters */}
                         {expandedModules.has(module.id) && (
                           <div className="pl-4 border-t border-gray-200">
-                            {module.chapters.map((chapter) => (
+                            {module.chapters.map((chapter, chapterIndex) => (
                               <div key={chapter.id} className="border-b border-gray-100 last:border-b-0">
                                 {/* Chapter Header */}
-                                <button
-                                  onClick={() => setExpandedChapters(prev => {
-                                    const next = new Set(prev);
-                                    if (next.has(chapter.id)) next.delete(chapter.id);
-                                    else next.add(chapter.id);
-                                    return next;
-                                  })}
-                                  className="w-full flex items-center gap-2 p-2 hover:bg-gray-50"
-                                >
-                                  <svg className={`w-3 h-3 transition-transform ${expandedChapters.has(chapter.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                                  </svg>
-                                  <span className="font-medium text-gray-700">{chapter.title}</span>
-                                  <span className="text-xs text-gray-400 ml-auto">{chapter.pages.length} pages</span>
-                                </button>
+                                <div className="flex items-center gap-2 p-2 hover:bg-gray-50">
+                                  <button
+                                    onClick={() => setExpandedChapters(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(chapter.id)) next.delete(chapter.id);
+                                      else next.add(chapter.id);
+                                      return next;
+                                    })}
+                                    className="flex items-center gap-2 flex-1 min-w-0"
+                                  >
+                                    <svg className={`w-3 h-3 transition-transform shrink-0 ${expandedChapters.has(chapter.id) ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                    {editingContentItem?.type === 'chapter' && editingContentItem?.id === chapter.id ? (
+                                      <input
+                                        type="text"
+                                        value={editingContentTitle}
+                                        onChange={(e) => setEditingContentTitle(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            renameContentItem('chapter', chapter.id, editingContentTitle);
+                                          } else if (e.key === 'Escape') {
+                                            setEditingContentItem(null);
+                                          }
+                                        }}
+                                        onBlur={() => renameContentItem('chapter', chapter.id, editingContentTitle)}
+                                        className="font-medium text-gray-700 bg-white border border-gray-300 rounded px-2 py-0.5 flex-1 min-w-0"
+                                        autoFocus
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                    ) : (
+                                      <span className="font-medium text-gray-700 truncate">{chapter.title}</span>
+                                    )}
+                                  </button>
+                                  <span className="text-xs text-gray-400 shrink-0">{chapter.pages.length} pages</span>
+                                  {/* Chapter actions */}
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const chapterName = chapter.id.split('/')[1];
+                                        createPage(module.id, chapterName);
+                                      }}
+                                      className="p-1 text-gray-500 hover:bg-gray-200 rounded"
+                                      title="Add page"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingContentItem({ type: 'chapter', id: chapter.id });
+                                        setEditingContentTitle(chapter.title);
+                                      }}
+                                      className="p-1 text-gray-500 hover:bg-gray-200 rounded"
+                                      title="Rename"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveContentItem('chapter', module.id, module.chapters.map(c => c.id.split('/')[1]), chapterIndex, 'up');
+                                      }}
+                                      disabled={chapterIndex === 0}
+                                      className={`p-1 rounded ${chapterIndex === 0 ? 'text-gray-300' : 'text-gray-500 hover:bg-gray-200'}`}
+                                      title="Move up"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveContentItem('chapter', module.id, module.chapters.map(c => c.id.split('/')[1]), chapterIndex, 'down');
+                                      }}
+                                      disabled={chapterIndex === module.chapters.length - 1}
+                                      className={`p-1 rounded ${chapterIndex === module.chapters.length - 1 ? 'text-gray-300' : 'text-gray-500 hover:bg-gray-200'}`}
+                                      title="Move down"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        deleteContentItem('chapter', chapter.id, chapter.title);
+                                      }}
+                                      disabled={editingContentItem !== null}
+                                      className={`p-1 rounded ${editingContentItem !== null ? 'text-gray-300' : 'text-red-500 hover:bg-red-100'}`}
+                                      title="Delete chapter"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                </div>
 
                                 {/* Pages */}
                                 {expandedChapters.has(chapter.id) && (
                                   <div className="pl-6 pb-2">
-                                    {chapter.pages.map((page) => (
+                                    {chapter.pages.map((page, pageIndex) => (
                                       <div
                                         key={page.id}
-                                        className="flex items-center gap-2 p-1.5 text-sm text-gray-600 hover:bg-gray-50 rounded"
+                                        className="flex items-center gap-2 p-1.5 text-sm text-gray-600 hover:bg-gray-50 rounded group"
                                       >
-                                        <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <svg className="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                         </svg>
-                                        <span className="truncate flex-1">{page.title}</span>
+                                        {editingContentItem?.type === 'page' && editingContentItem?.id === page.id ? (
+                                          <input
+                                            type="text"
+                                            value={editingContentTitle}
+                                            onChange={(e) => setEditingContentTitle(e.target.value)}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') {
+                                                renameContentItem('page', page.id, editingContentTitle);
+                                              } else if (e.key === 'Escape') {
+                                                setEditingContentItem(null);
+                                              }
+                                            }}
+                                            onBlur={() => renameContentItem('page', page.id, editingContentTitle)}
+                                            className="text-gray-600 bg-white border border-gray-300 rounded px-2 py-0.5 flex-1 min-w-0"
+                                            autoFocus
+                                          />
+                                        ) : (
+                                          <span className="truncate flex-1">{page.title}</span>
+                                        )}
                                         {page.segmentCount > 0 && (
-                                          <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">
+                                          <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded shrink-0">
                                             {page.segmentCount} tasks
                                           </span>
                                         )}
+                                        {/* Page actions - visible on hover */}
+                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                                          <button
+                                            onClick={() => {
+                                              setEditingContentItem({ type: 'page', id: page.id });
+                                              setEditingContentTitle(page.title);
+                                            }}
+                                            className="p-1 text-gray-500 hover:bg-gray-200 rounded"
+                                            title="Rename"
+                                          >
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                            </svg>
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              const chapterName = chapter.id.split('/')[1];
+                                              moveContentItem('page', `${module.id}/${chapterName}`, chapter.pages.map(p => p.filename), pageIndex, 'up');
+                                            }}
+                                            disabled={pageIndex === 0}
+                                            className={`p-1 rounded ${pageIndex === 0 ? 'text-gray-300' : 'text-gray-500 hover:bg-gray-200'}`}
+                                            title="Move up"
+                                          >
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                                            </svg>
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              const chapterName = chapter.id.split('/')[1];
+                                              moveContentItem('page', `${module.id}/${chapterName}`, chapter.pages.map(p => p.filename), pageIndex, 'down');
+                                            }}
+                                            disabled={pageIndex === chapter.pages.length - 1}
+                                            className={`p-1 rounded ${pageIndex === chapter.pages.length - 1 ? 'text-gray-300' : 'text-gray-500 hover:bg-gray-200'}`}
+                                            title="Move down"
+                                          >
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                            </svg>
+                                          </button>
+                                          <button
+                                            onClick={() => deleteContentItem('page', page.id, page.title)}
+                                            disabled={editingContentItem !== null}
+                                            className={`p-1 rounded ${editingContentItem !== null ? 'text-gray-300' : 'text-red-500 hover:bg-red-100'}`}
+                                            title="Delete page"
+                                          >
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                          </button>
+                                        </div>
                                       </div>
                                     ))}
                                   </div>

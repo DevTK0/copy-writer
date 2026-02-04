@@ -538,6 +538,43 @@ app.post('/api/content/page', (req, res) => {
 
     const pageFiles = fs.readdirSync(chapterPath).filter(f => f.endsWith('.md'));
 
+    // Get module and chapter titles from an existing page, or use fallbacks
+    let moduleTitle = extractTitleFromName(moduleId);
+    let chapterTitle = extractTitleFromName(chapterId);
+
+    if (pageFiles.length > 0) {
+      // Get titles from sibling page in same chapter
+      const existingPagePath = path.join(chapterPath, pageFiles[0]);
+      const existingContent = fs.readFileSync(existingPagePath, 'utf-8');
+      const titleParts = extractTitleParts(existingContent, {
+        module: moduleTitle,
+        chapter: chapterTitle,
+        page: ''
+      });
+      moduleTitle = titleParts.module;
+      chapterTitle = titleParts.chapter;
+    } else {
+      // No pages in this chapter, check other chapters in the module for module title
+      const modulePath = path.join(CONTENT_DIR, moduleId);
+      const otherChapters = fs.readdirSync(modulePath)
+        .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory() && f !== chapterId);
+
+      for (const otherChapter of otherChapters) {
+        const otherChapterPath = path.join(modulePath, otherChapter);
+        const otherPages = fs.readdirSync(otherChapterPath).filter(f => f.endsWith('.md'));
+        if (otherPages.length > 0) {
+          const existingContent = fs.readFileSync(path.join(otherChapterPath, otherPages[0]), 'utf-8');
+          const titleParts = extractTitleParts(existingContent, {
+            module: moduleTitle,
+            chapter: '',
+            page: ''
+          });
+          moduleTitle = titleParts.module;
+          break;
+        }
+      }
+    }
+
     let maxOrder = 0;
     pageFiles.forEach(f => {
       const num = parseInt(f.split('-')[0]) || 0;
@@ -548,7 +585,11 @@ app.post('/api/content/page', (req, res) => {
     const safeName = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
     const filename = `${order}-${safeName}.md`;
 
-    fs.writeFileSync(path.join(chapterPath, filename), content || '', 'utf-8');
+    // Add title comment with correct module/chapter/page titles
+    const titleComment = `<!-- title: ${moduleTitle} > ${chapterTitle} > ${title} -->\n`;
+    const pageContent = titleComment + (content || '');
+
+    fs.writeFileSync(path.join(chapterPath, filename), pageContent, 'utf-8');
 
     res.json({ success: true, id: `${moduleId}/${chapterId}/${filename}` });
   } catch (error) {
@@ -574,6 +615,141 @@ app.delete('/api/content/:type/*itemPath', (req, res) => {
     } else {
       fs.rmSync(fullPath, { recursive: true });
     }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Helper to update title comments in all pages under a path
+function updateTitleCommentsInPath(dirPath: string, newModuleTitle?: string, newChapterTitle?: string) {
+  if (!fs.existsSync(dirPath)) return;
+
+  const stat = fs.statSync(dirPath);
+  if (stat.isFile() && dirPath.endsWith('.md')) {
+    // Update single file
+    const content = fs.readFileSync(dirPath, 'utf-8');
+    const match = content.match(/^<!--\s*title:\s*(.+?)\s*-->\n?/);
+    if (match) {
+      const parts = match[1].split(' > ');
+      const updatedParts = [
+        newModuleTitle ?? parts[0] ?? '',
+        newChapterTitle ?? parts[1] ?? '',
+        parts[2] ?? ''
+      ];
+      const newComment = `<!-- title: ${updatedParts.join(' > ')} -->\n`;
+      const newContent = content.replace(/^<!--\s*title:\s*.+?\s*-->\n?/, newComment);
+      fs.writeFileSync(dirPath, newContent, 'utf-8');
+    }
+  } else if (stat.isDirectory()) {
+    // Recurse into directory
+    const items = fs.readdirSync(dirPath);
+    items.forEach(item => {
+      updateTitleCommentsInPath(path.join(dirPath, item), newModuleTitle, newChapterTitle);
+    });
+  }
+}
+
+// Rename module/chapter/page
+app.post('/api/content/rename', (req, res) => {
+  try {
+    const { type, itemPath, newTitle } = req.body;
+    // type: 'module' | 'chapter' | 'page'
+    // itemPath: relative path like "001-module" or "001-module/001-chapter" or "001-module/001-chapter/001-page.md"
+
+    const fullPath = path.join(CONTENT_DIR, itemPath);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    const parentDir = path.dirname(fullPath);
+    const oldName = path.basename(fullPath);
+    const numericPrefix = oldName.match(/^(\d+)-/)?.[1] || '001';
+    const safeName = newTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 30);
+
+    let newName: string;
+    if (type === 'page') {
+      newName = `${numericPrefix}-${safeName}.md`;
+    } else {
+      newName = `${numericPrefix}-${safeName}`;
+    }
+
+    const newPath = path.join(parentDir, newName);
+
+    // Rename the file/directory
+    if (oldName !== newName) {
+      fs.renameSync(fullPath, newPath);
+    }
+
+    // Update title comments in affected files
+    if (type === 'module') {
+      updateTitleCommentsInPath(newPath, newTitle, undefined);
+    } else if (type === 'chapter') {
+      updateTitleCommentsInPath(newPath, undefined, newTitle);
+    } else if (type === 'page') {
+      // Update just this page's title comment
+      const content = fs.readFileSync(newPath, 'utf-8');
+      const match = content.match(/^<!--\s*title:\s*(.+?)\s*-->\n?/);
+      if (match) {
+        const parts = match[1].split(' > ');
+        parts[2] = newTitle;
+        const newComment = `<!-- title: ${parts.join(' > ')} -->\n`;
+        const newContent = content.replace(/^<!--\s*title:\s*.+?\s*-->\n?/, newComment);
+        fs.writeFileSync(newPath, newContent, 'utf-8');
+      }
+    }
+
+    // Return new path for frontend to update state
+    const newItemPath = path.join(path.dirname(itemPath), newName);
+    res.json({ success: true, newPath: newItemPath });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Reorder modules/chapters/pages
+app.post('/api/content/reorder', (req, res) => {
+  try {
+    const { type, parentPath, items } = req.body;
+    // type: 'module' | 'chapter' | 'page'
+    // parentPath: parent directory (empty for modules, moduleId for chapters, moduleId/chapterId for pages)
+    // items: array of current names in new order
+
+    const targetDir = parentPath ? path.join(CONTENT_DIR, parentPath) : CONTENT_DIR;
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(404).json({ error: 'Parent directory not found' });
+    }
+
+    // Build rename map
+    const tempRenames: { from: string; to: string }[] = [];
+
+    items.forEach((itemName: string, index: number) => {
+      const oldPath = path.join(targetDir, itemName);
+      if (!fs.existsSync(oldPath)) return;
+
+      const newOrder = String(index + 1).padStart(3, '0');
+      const namePart = itemName.replace(/^\d+-/, '');
+      const newName = `${newOrder}-${namePart}`;
+
+      if (itemName !== newName) {
+        tempRenames.push({ from: itemName, to: newName });
+      }
+    });
+
+    // Use temp names to avoid conflicts
+    tempRenames.forEach(({ from }, i) => {
+      const oldPath = path.join(targetDir, from);
+      const tempPath = path.join(targetDir, `_temp_${i}_${from}`);
+      fs.renameSync(oldPath, tempPath);
+    });
+
+    tempRenames.forEach(({ to }, i) => {
+      const tempPath = path.join(targetDir, `_temp_${i}_${tempRenames[i].from}`);
+      const newPath = path.join(targetDir, to);
+      fs.renameSync(tempPath, newPath);
+    });
 
     res.json({ success: true });
   } catch (error) {
