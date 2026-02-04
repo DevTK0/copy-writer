@@ -70,6 +70,7 @@ function App() {
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [images, setImages] = useState<string[]>([]);
   const [imageSearch, setImageSearch] = useState('');
+  const [chunkSearch, setChunkSearch] = useState('');
   const [chunks, setChunks] = useState<Chunk[]>(() => {
     const saved = localStorage.getItem('copywriter-chunks');
     return saved ? JSON.parse(saved) : [];
@@ -84,12 +85,14 @@ function App() {
   const [dragOverChunkIndex, setDragOverChunkIndex] = useState<number | null>(null);
   const [lastProcessedChunkId, setLastProcessedChunkId] = useState<string | null>(null);
   const [processingChunkId, setProcessingChunkId] = useState<string | null>(null);
+  const [focusedChunkId, setFocusedChunkId] = useState<string | null>(null);
   const [history, setHistory] = useState<HistorySnapshot[]>(() => {
     const saved = localStorage.getItem('copywriter-history');
     return saved ? JSON.parse(saved) : [];
   });
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadMemoryFiles();
@@ -418,6 +421,19 @@ function App() {
     setContent(composedContent);
     setLastProcessedChunkId(null);
     setLastProcessedSegment(null);
+  };
+
+  const scrollToChunkInEditor = (chunkId: string) => {
+    if (editorRef.current) {
+      const element = editorRef.current.querySelector(`[data-chunk-id="${chunkId}"]`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setFocusedChunkId(chunkId);
+        setTimeout(() => {
+          setFocusedChunkId(null);
+        }, 2000);
+      }
+    }
   };
 
   const renderPreview = () => {
@@ -845,38 +861,53 @@ function App() {
             </svg>
           </button>
           {openAccordion === 'chunks' && (
-            <div className="px-2 pb-4 space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
-              {chunks.map((chunk) => (
-                <div
-                  key={chunk.id}
-                  className="flex items-center space-x-2 p-2 rounded hover:bg-gray-50"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedChunks.has(chunk.id)}
-                    onChange={() => {
-                      setSelectedChunks(prev => {
-                        const newSet = new Set(prev);
-                        if (newSet.has(chunk.id)) {
-                          newSet.delete(chunk.id);
-                        } else {
-                          newSet.add(chunk.id);
-                        }
-                        return newSet;
-                      });
-                    }}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded shrink-0"
-                  />
-                  <p className="text-sm font-medium text-gray-900 truncate flex-1" title={chunk.title}>
-                    {chunk.title}
+            <div className="px-4 pb-4">
+              <input
+                type="text"
+                placeholder="Search chunks..."
+                value={chunkSearch}
+                onChange={(e) => setChunkSearch(e.target.value)}
+                className="w-full mb-2 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+              <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto">
+                {chunks
+                  .filter(chunk => chunk.title.toLowerCase().includes(chunkSearch.toLowerCase()))
+                  .map((chunk) => (
+                  <div
+                    key={chunk.id}
+                    className="flex items-center space-x-2 p-2 rounded hover:bg-gray-50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedChunks.has(chunk.id)}
+                      onChange={() => {
+                        setSelectedChunks(prev => {
+                          const newSet = new Set(prev);
+                          if (newSet.has(chunk.id)) {
+                            newSet.delete(chunk.id);
+                          } else {
+                            newSet.add(chunk.id);
+                          }
+                          return newSet;
+                        });
+                      }}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded shrink-0"
+                    />
+                    <p
+                      className="text-sm font-medium text-gray-900 truncate flex-1 cursor-pointer hover:text-blue-600"
+                      title={chunk.title}
+                      onClick={() => scrollToChunkInEditor(chunk.id)}
+                    >
+                      {chunk.title}
+                    </p>
+                  </div>
+                ))}
+                {chunks.filter(chunk => chunk.title.toLowerCase().includes(chunkSearch.toLowerCase())).length === 0 && (
+                  <p className="text-sm text-gray-500 text-center py-4">
+                    No chunks found
                   </p>
-                </div>
-              ))}
-              {chunks.length === 0 && (
-                <p className="text-sm text-gray-500 text-center py-4">
-                  No chunks found
-                </p>
-              )}
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1166,7 +1197,7 @@ function App() {
                   <h2 className="text-lg font-medium">Markdown Editor</h2>
                   <span className="text-xs text-gray-500">{chunks.length} chunks</span>
                 </div>
-                <div className="p-4 flex-1 overflow-y-auto space-y-2 min-h-0">
+                <div ref={editorRef} className="p-4 flex-1 overflow-y-auto space-y-2 min-h-0">
                   {chunks.length === 0 ? (
                     <textarea
                       value={content}
@@ -1181,6 +1212,7 @@ function App() {
                     chunks.map((chunk, index) => (
                       <div
                         key={chunk.id}
+                        data-chunk-id={chunk.id}
                         draggable={editingChunkId !== chunk.id}
                         onDragStart={() => handleChunkDragStart(index)}
                         onDragOver={(e) => handleChunkDragOver(e, index)}
@@ -1189,6 +1221,8 @@ function App() {
                         className={`border rounded-lg transition-all ${
                           processingChunkId === chunk.id
                             ? 'border-yellow-400 border-2 bg-yellow-50'
+                            : focusedChunkId === chunk.id
+                            ? 'border-blue-400 border-2 bg-blue-50'
                             : lastProcessedChunkId === chunk.id
                             ? 'border-green-400 border-2 bg-green-50'
                             : draggingChunkIndex === index
@@ -1201,6 +1235,8 @@ function App() {
                         <div className={`flex items-center gap-2 px-3 py-2 border-b rounded-t-lg ${
                           processingChunkId === chunk.id
                             ? 'bg-yellow-100 border-yellow-200'
+                            : focusedChunkId === chunk.id
+                            ? 'bg-blue-100 border-blue-200'
                             : lastProcessedChunkId === chunk.id
                             ? 'bg-green-100 border-green-200'
                             : 'bg-gray-50 border-gray-200'
