@@ -23,7 +23,8 @@ export function chunkMarkdown(content: string): MarkdownChunk[] {
   let currentChunk: MarkdownChunk | null = null;
   let chunkId = 0;
 
-  lines.forEach((line, index) => {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const headerMatch = line.match(/^#\s+(.+)$/); // Only match level 1 headers
 
     if (headerMatch) {
@@ -42,11 +43,12 @@ export function chunkMarkdown(content: string): MarkdownChunk[] {
         startLine: index,
         endLine: index
       };
-    } else if (currentChunk) {
-      currentChunk.content += line + '\n';
     } else {
-      // Preamble (content before first # header)
-      if (!currentChunk) {
+      // Either append to current chunk or start preamble
+      if (currentChunk) {
+        currentChunk.content += line + '\n';
+      } else {
+        // Preamble (content before first # header)
         currentChunk = {
           id: `chunk-preamble`,
           title: 'Preamble',
@@ -57,10 +59,10 @@ export function chunkMarkdown(content: string): MarkdownChunk[] {
         };
       }
     }
-  });
+  }
 
   // Save last chunk
-  if (currentChunk !== null && currentChunk) {
+  if (currentChunk) {
     currentChunk.endLine = lines.length - 1;
     chunks.push(currentChunk);
   }
