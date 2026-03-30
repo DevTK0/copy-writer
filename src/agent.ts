@@ -8,7 +8,7 @@ export interface AgentOptions {
   existingContent?: string;
   context?: string;
   memory?: Map<string, string>;
-  mode?: 'prompt' | 'autoprompt' | 'research';
+  mode?: 'prompt' | 'autoprompt' | 'research' | 'raw';
 }
 
 export async function generateWithClaude(options: AgentOptions): Promise<string> {
@@ -30,7 +30,9 @@ export async function generateWithClaude(options: AgentOptions): Promise<string>
     fullPrompt += '---\n\n';
   }
 
-  if (mode === 'research') {
+  if (mode === 'raw') {
+    fullPrompt += prompt;
+  } else if (mode === 'research') {
     // Research mode: do comprehensive research and create a markdown document
     fullPrompt += '# Research Task\n\n';
     fullPrompt += prompt;

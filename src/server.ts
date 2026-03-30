@@ -466,6 +466,7 @@ app.delete('/api/images/:filename', (req, res) => {
 
 // Content hierarchy management (Module > Chapter > Page)
 const CONTENT_DIR = './examples/content';
+const QUIZZES_DIR = './examples/quizzes';
 
 function ensureContentDir() {
   if (!fs.existsSync(CONTENT_DIR)) {
@@ -780,6 +781,12 @@ app.delete('/api/content/:type/*itemPath', (req, res) => {
       fs.unlinkSync(fullPath);
     } else {
       fs.rmSync(fullPath, { recursive: true });
+
+      // Cascade-delete corresponding quiz data
+      const quizPath = path.join(QUIZZES_DIR, itemPath);
+      if (fs.existsSync(quizPath)) {
+        fs.rmSync(quizPath, { recursive: true });
+      }
     }
 
     res.json({ success: true });
@@ -1394,6 +1401,210 @@ app.post('/api/chunks/:filename/process', async (req, res) => {
       processedContent,
       generatedContent
     });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Quiz endpoints
+app.get('/api/quizzes', (req, res) => {
+  try {
+    const quizzes: Record<string, any[]> = {};
+
+    if (!fs.existsSync(QUIZZES_DIR)) {
+      return res.json({ quizzes });
+    }
+
+    const moduleDirs = fs.readdirSync(QUIZZES_DIR)
+      .filter(f => fs.statSync(path.join(QUIZZES_DIR, f)).isDirectory());
+
+    for (const moduleDir of moduleDirs) {
+      const modulePath = path.join(QUIZZES_DIR, moduleDir);
+      const chapterDirs = fs.readdirSync(modulePath)
+        .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory());
+
+      for (const chapterDir of chapterDirs) {
+        const quizFile = path.join(modulePath, chapterDir, 'questions.json');
+        if (fs.existsSync(quizFile)) {
+          const key = `${moduleDir}/${chapterDir}`;
+          quizzes[key] = JSON.parse(fs.readFileSync(quizFile, 'utf-8'));
+        }
+      }
+    }
+
+    res.json({ quizzes });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.put('/api/quizzes/:modulePath/:chapterPath', (req, res) => {
+  try {
+    const { modulePath, chapterPath } = req.params;
+    const { questions } = req.body;
+    const dirPath = path.join(QUIZZES_DIR, modulePath, chapterPath);
+
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(path.join(dirPath, 'questions.json'), JSON.stringify(questions, null, 2), 'utf-8');
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Quiz bank endpoints
+const QUIZ_SYSTEM_PROMPT_FILE = './examples/quizzes/system-prompt.txt';
+const DEFAULT_QUIZ_SYSTEM_PROMPT = `Generate multiple-choice quiz questions based on the provided course content. Each question should have 4 options with exactly one correct answer. Questions should test comprehension and application of the material.`;
+
+app.get('/api/quiz-system-prompt', (req, res) => {
+  try {
+    let prompt = DEFAULT_QUIZ_SYSTEM_PROMPT;
+    if (fs.existsSync(QUIZ_SYSTEM_PROMPT_FILE)) {
+      prompt = fs.readFileSync(QUIZ_SYSTEM_PROMPT_FILE, 'utf-8');
+    }
+    res.json({ prompt });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.put('/api/quiz-system-prompt', (req, res) => {
+  try {
+    const { prompt } = req.body;
+    fs.mkdirSync(path.dirname(QUIZ_SYSTEM_PROMPT_FILE), { recursive: true });
+    fs.writeFileSync(QUIZ_SYSTEM_PROMPT_FILE, prompt, 'utf-8');
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.get('/api/quiz-bank', (req, res) => {
+  try {
+    const banks: Record<string, any[]> = {};
+
+    if (!fs.existsSync(QUIZZES_DIR)) {
+      return res.json({ banks });
+    }
+
+    const moduleDirs = fs.readdirSync(QUIZZES_DIR)
+      .filter(f => fs.statSync(path.join(QUIZZES_DIR, f)).isDirectory());
+
+    for (const moduleDir of moduleDirs) {
+      const modulePath = path.join(QUIZZES_DIR, moduleDir);
+      const chapterDirs = fs.readdirSync(modulePath)
+        .filter(f => fs.statSync(path.join(modulePath, f)).isDirectory());
+
+      for (const chapterDir of chapterDirs) {
+        const bankFile = path.join(modulePath, chapterDir, 'bank.json');
+        if (fs.existsSync(bankFile)) {
+          const key = `${moduleDir}/${chapterDir}`;
+          banks[key] = JSON.parse(fs.readFileSync(bankFile, 'utf-8'));
+        }
+      }
+    }
+
+    res.json({ banks });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.put('/api/quiz-bank/:modulePath/:chapterPath', (req, res) => {
+  try {
+    const { modulePath, chapterPath } = req.params;
+    const { questions } = req.body;
+    const dirPath = path.join(QUIZZES_DIR, modulePath, chapterPath);
+
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(path.join(dirPath, 'bank.json'), JSON.stringify(questions, null, 2), 'utf-8');
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+app.post('/api/quiz-bank/:modulePath/:chapterPath/generate', async (req, res) => {
+  try {
+    const { modulePath, chapterPath } = req.params;
+    const { count = 5 } = req.body;
+
+    // Read system prompt
+    let systemPrompt = DEFAULT_QUIZ_SYSTEM_PROMPT;
+    if (fs.existsSync(QUIZ_SYSTEM_PROMPT_FILE)) {
+      systemPrompt = fs.readFileSync(QUIZ_SYSTEM_PROMPT_FILE, 'utf-8');
+    }
+
+    // Read all markdown pages from the chapter content
+    const contentDir = path.join(CONTENT_DIR, modulePath, chapterPath);
+    let pageContents = '';
+    if (fs.existsSync(contentDir)) {
+      const mdFiles = fs.readdirSync(contentDir).filter(f => f.endsWith('.md')).sort();
+      for (const file of mdFiles) {
+        const content = fs.readFileSync(path.join(contentDir, file), 'utf-8');
+        pageContents += `\n\n--- ${file} ---\n\n${content}`;
+      }
+    }
+
+    // Read existing bank for dedup context
+    const bankFile = path.join(QUIZZES_DIR, modulePath, chapterPath, 'bank.json');
+    let existingBank: any[] = [];
+    if (fs.existsSync(bankFile)) {
+      existingBank = JSON.parse(fs.readFileSync(bankFile, 'utf-8'));
+    }
+
+    const existingContext = existingBank.length > 0
+      ? `\n\nExisting questions to AVOID duplicating:\n${JSON.stringify(existingBank.map(q => q.question))}`
+      : '';
+
+    const prompt = `${systemPrompt}
+
+Generate exactly ${count} new multiple-choice quiz questions.${existingContext}
+
+Return ONLY a JSON array of objects with this exact format (no markdown fences, no extra text):
+[
+  {
+    "id": "unique_id",
+    "question": "The question text (markdown supported)",
+    "options": [
+      { "label": "A", "text": "Option text", "isCorrect": false },
+      { "label": "B", "text": "Option text", "isCorrect": true },
+      { "label": "C", "text": "Option text", "isCorrect": false },
+      { "label": "D", "text": "Option text", "isCorrect": false }
+    ]
+  }
+]`;
+
+    const generatedContent = await generateWithClaude({
+      prompt,
+      context: pageContents || undefined,
+      mode: 'raw'
+    });
+
+    // Parse JSON response - strip markdown fences if present
+    let jsonStr = generatedContent.trim();
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    }
+
+    const newQuestions = JSON.parse(jsonStr);
+
+    // Ensure each question has an id
+    for (const q of newQuestions) {
+      if (!q.id) {
+        q.id = Math.random().toString(36).substring(2, 10);
+      }
+    }
+
+    // Append to bank and save
+    const updatedBank = [...existingBank, ...newQuestions];
+    const dirPath = path.join(QUIZZES_DIR, modulePath, chapterPath);
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(path.join(dirPath, 'bank.json'), JSON.stringify(updatedBank, null, 2), 'utf-8');
+
+    res.json({ questions: updatedBank });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }

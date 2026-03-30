@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { marked } from 'marked';
+import { QuizTab } from './QuizTab';
+import type { Module, Chapter, Page } from './types';
 
 interface Segment {
   index: number;
@@ -18,31 +20,6 @@ interface Segment {
 interface MemoryFile {
   filename: string;
   content: string;
-}
-
-interface Page {
-  id: string;
-  filename: string;
-  title: string;
-  moduleTitle?: string;
-  chapterTitle?: string;
-  content: string;
-  order: number;
-  segmentCount: number;
-}
-
-interface Chapter {
-  id: string;
-  title: string;
-  order: number;
-  pages: Page[];
-}
-
-interface Module {
-  id: string;
-  title: string;
-  order: number;
-  chapters: Chapter[];
 }
 
 interface HistorySnapshot {
@@ -77,9 +54,9 @@ function App() {
     const saved = localStorage.getItem('copywriter-sidebarCollapsed');
     return saved ? JSON.parse(saved) : false;
   });
-  const [activeTab, setActiveTab] = useState<'editor' | 'content' | 'memory' | 'research' | 'images'>(() => {
+  const [activeTab, setActiveTab] = useState<'editor' | 'content' | 'memory' | 'research' | 'images' | 'quizzes'>(() => {
     const saved = localStorage.getItem('copywriter-activeTab');
-    return (saved as 'editor' | 'content' | 'memory' | 'research' | 'images') || 'editor';
+    return (saved as 'editor' | 'content' | 'memory' | 'research' | 'images' | 'quizzes') || 'editor';
   });
   const [selectedMemoryFile, setSelectedMemoryFile] = useState<string | null>(() => {
     const saved = localStorage.getItem('copywriter-selectedMemoryFile');
@@ -1776,6 +1753,16 @@ function App() {
             >
               Images
             </button>
+            <button
+              onClick={() => setActiveTab('quizzes')}
+              className={`${
+                activeTab === 'quizzes'
+                  ? 'border-green-500 text-green-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+            >
+              Quizzes
+            </button>
           </nav>
         </div>
 
@@ -2601,6 +2588,10 @@ More content...`}
                 )}
               </div>
             </div>
+          )}
+
+          {activeTab === 'quizzes' && (
+            <QuizTab modules={modules} />
           )}
         </div>
       </div>
